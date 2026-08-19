@@ -297,26 +297,32 @@ def get_latest_snapshot(code):
 # 被动埋点: 触发检测
 # ============================================================
 
-def check_triggers(code, market, name, quote, prev):
+def check_triggers(code, market, name, quote, prev,
+                    price_threshold=None, volume_ratio=None):
     signals = []
     change_pct = quote.get('change_pct', 0)
     volume = quote.get('volume', 0)
     price = quote.get('price', 0)
 
-    if abs(change_pct) >= 5:
+    if price_threshold is None:
+        price_threshold = st.session_state.get('trigger_price_threshold', 5.0)
+    if volume_ratio is None:
+        volume_ratio = st.session_state.get('trigger_volume_ratio', 2.0)
+
+    if abs(change_pct) >= price_threshold:
         direction = "大涨" if change_pct > 0 else "大跌"
         signals.append({
             'signal_type': 'price_limit',
-            'description': f"{direction} {change_pct:+.2f}%",
+            'description': f"{direction} {change_pct:+.2f}% (阈值:±{price_threshold}%)",
             'price': price, 'volume': volume,
         })
 
     if prev and prev.get('volume', 0) > 0 and volume > 0:
-        vol_ratio = volume / prev['volume']
-        if vol_ratio >= 2.0:
+        vol_ratio_val = volume / prev['volume']
+        if vol_ratio_val >= volume_ratio:
             signals.append({
                 'signal_type': 'volume_surge',
-                'description': f"成交量放大 {vol_ratio:.1f} 倍 (前:{prev['volume']} 现:{volume})",
+                'description': f"成交量放大 {vol_ratio_val:.1f} 倍 (前:{prev['volume']} 现:{volume}, 阈值:{volume_ratio}倍)",
                 'price': price, 'volume': volume,
             })
 
@@ -414,9 +420,9 @@ def render_tracking_page():
         total_snaps = get_snapshot_count()
         total_signals = len(get_recent_signals(limit=1000))
         st.metric("已采集快照", f"{total_snaps:,}")
-        st.metric("信号事件", f"{total_signals}")
+        st.metric("被动信号事件", f"{total_signals}")
 
-    tab1, tab2, tab3 = st.tabs(["追踪管理", "信号事件", "历史走势"])
+    tab1, tab2, tab3 = st.tabs(["追踪管理", "被动信号事件", "历史走势"])
 
     # ---- Tab 1: 追踪管理 ----
     with tab1:
@@ -471,6 +477,26 @@ def render_tracking_page():
 
         st.divider()
 
+        st.subheader("被动埋点触发设置")
+        tc1, tc2 = st.columns(2)
+        with tc1:
+            price_thresh = st.number_input(
+                "涨跌幅阈值 (%)",
+                min_value=0.1, max_value=20.0, value=5.0, step=0.5,
+                help="涨跌幅超过此值时触发信号（默认 5%）",
+                key="trigger_price_threshold"
+            )
+        with tc2:
+            vol_ratio = st.number_input(
+                "成交量放大倍数",
+                min_value=1.1, max_value=10.0, value=2.0, step=0.1,
+                help="成交量与前值比值超过此倍数时触发信号（默认 2.0 倍）",
+                key="trigger_volume_ratio"
+            )
+        st.caption(f"当前阈值: 涨跌幅 ±{price_thresh}% | 成交量放大 {vol_ratio} 倍")
+
+        st.divider()
+
         st.subheader("追踪控制")
         tracking_active = st.session_state.get('tracking_active', False)
 
@@ -504,11 +530,11 @@ def render_tracking_page():
         else:
             st.caption("点击「开始追踪」开启自动采集，或「立即采集一次」手动执行")
 
-    # ---- Tab 2: 信号事件 ----
+    # ---- Tab 2: 被动信号事件 ----
     with tab2:
         signals = get_recent_signals(limit=50)
         if not signals:
-            st.info("暂无信号事件。追踪运行后会自动检测并记录。")
+            st.info("暂无被动信号事件。追踪运行后会根据自定义阈值自动检测并记录。")
         else:
             import pandas as pd
             df_signals = pd.DataFrame(signals)
@@ -583,7 +609,7 @@ def render_database_page():
     tab1, tab2, tab3, tab4 = st.tabs([
         f"追踪列表",
         f"行情快照",
-        f"信号事件",
+        f"被动信号事件",
         "自定义查询",
     ])
 
@@ -655,7 +681,7 @@ def render_database_page():
             csv = df.to_csv(index=False).encode('utf-8-sig')
             st.download_button("导出 CSV", csv, "signal_events.csv", "text/csv; charset=utf-8")
         else:
-            st.info("暂无信号事件")
+            st.info("暂无被动信号事件")
 
     # --- Tab 4: Custom SQL ---
     with tab4:
