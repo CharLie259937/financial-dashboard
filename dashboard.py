@@ -13,6 +13,7 @@ import re
 import akshare as ak
 from datetime import datetime, timedelta
 from requests.adapters import HTTPAdapter
+import quant_data
 from urllib3.util.retry import Retry
 
 st.set_page_config(page_title="金融数据可视化面板", layout="wide")
@@ -354,12 +355,14 @@ def fetch_indices() -> list:
 # UI
 # ============================================================
 
-page = st.sidebar.radio("导航", ["实时查询", "长期追踪", "数据库浏览"])
+page = st.sidebar.radio("导航", ["实时查询", "长期追踪", "量化分析", "数据库浏览"])
 
 if page == "实时查询":
     st.title("金融数据可视化面板")
 elif page == "长期追踪":
     st.title("股票长期追踪")
+elif page == "量化分析":
+    st.title("📊 量化分析")
 elif page == "数据库浏览":
     st.title("数据库浏览")
 
@@ -771,6 +774,338 @@ if page == "实时查询":
 elif page == "长期追踪":
     import tracker
     tracker.render_tracking_page()
+
+
+
+# ============================================================
+# 量化分析页面
+# ============================================================
+elif page == "量化分析":
+    quant_tab1, quant_tab2, quant_tab3, quant_tab4 = st.tabs([
+        "📈 数据采集", "🔔 信号检测", "📝 事件管理", "📊 数据概览"
+    ])
+
+    # --- Tab 1: 数据采集 ---
+    with quant_tab1:
+        st.subheader("股票池管理")
+
+        # 添加股票到池
+        qp1, qp2, qp3, qp4 = st.columns([2, 1, 2, 1])
+        with qp1:
+            new_code = st.text_input("股票代码", placeholder="如 600000 / AAPL / 00700", key="qp_code")
+        with qp2:
+            new_market = st.selectbox("市场", ["A股", "美股", "港股"], key="qp_market")
+        with qp3:
+            new_sector = st.text_input("板块/行业", placeholder="如 银行/科技/新能源", key="qp_sector")
+        with qp4:
+            st.write("")
+            st.write("")
+            if st.button("加入股票池", type="primary", key="qp_add"):
+                if new_code.strip():
+                    quant_data.add_to_pool(new_code, new_market, "", new_sector)
+                    st.success(f"已加入: {new_code.strip().upper()} ({new_market})")
+                    st.rerun()
+
+        st.divider()
+
+        # 股票池列表
+        pool = quant_data.get_stock_pool(active_only=False)
+        if not pool:
+            st.info("股票池为空，请先添加股票")
+        else:
+            st.write(f"**股票池 ({len(pool)} 只)**")
+            pool_data = []
+            for s in pool:
+                pool_data.append({
+                    "代码": s["code"],
+                    "市场": s["market"],
+                    "名称": s.get("name", "") or "—",
+                    "板块": s.get("sector", "") or "—",
+                    "状态": "活跃" if s.get("is_active") else "暂停",
+                    "涨幅阈值": f"±{s.get('price_threshold', 5.0)}%",
+                    "量能倍数": f"{s.get('volume_ratio', 2.0)}x",
+                })
+            st.dataframe(pd.DataFrame(pool_data), use_container_width=True, hide_index=True)
+
+            # 删除/切换活跃
+            dc1, dc2 = st.columns([1, 1])
+            with dc1:
+                del_code = st.selectbox("选择移除的股票", [s["code"] for s in pool], key="qp_del")
+                if st.button("移除", key="qp_remove"):
+                    quant_data.remove_from_pool(del_code)
+                    st.rerun()
+            with dc2:
+                toggle_code = st.selectbox("切换活跃状态", [s["code"] for s in pool], key="qp_toggle")
+                if st.button("切换", key="qp_toggle_btn"):
+                    s = next(x for x in pool if x["code"] == toggle_code)
+                    quant_data.set_pool_active(toggle_code, not s.get("is_active"))
+                    st.rerun()
+
+        st.divider()
+
+        # 日线数据采集
+        st.subheader("日线数据采集")
+        col_days, col_btn1, col_btn2 = st.columns([1, 1, 1])
+        with col_days:
+            collect_days = st.number_input("采集天数", min_value=30, max_value=1095, value=365, step=30, key="qp_days")
+        with col_btn1:
+            if st.button("采集股票池数据", type="primary", key="qp_collect_pool"):
+                with st.spinner("正在批量采集日线数据..."):
+                    results = quant_data.batch_collect_daily(days=int(collect_days))
+                total = sum(r["rows"] for r in results)
+                st.success(f"采集完成! 共 {len(results)} 只股票, {total} 条记录")
+                for r in results:
+                    st.write(f"  {r['code']} ({r['market']}): {r['rows']} 条")
+        with col_btn2:
+            manual_code = st.text_input("单只采集代码", placeholder="如 600000", key="qp_manual_code")
+            if st.button("采集单只", key="qp_collect_one"):
+                if manual_code.strip():
+                    with st.spinner(f"采集 {manual_code} ..."):
+                        n = quant_data.collect_a_share_daily(manual_code, int(collect_days))
+                    if n > 0:
+                        st.success(f"采集成功: {manual_code} {n} 条记录")
+                    else:
+                        st.error(f"采集失败: {manual_code}")
+
+    # --- Tab 2: 信号检测 ---
+    with quant_tab2:
+        st.subheader("被动信号检测")
+
+        # 运行检测
+        if st.button("运行信号检测", type="primary", key="qd_detect"):
+            with st.spinner("正在检测技术指标信号..."):
+                results = quant_data.run_signal_detection()
+            total_sigs = sum(r["signals"] for r in results)
+            st.success(f"检测完成! 共 {total_sigs} 个信号")
+            for r in results:
+                if r["signals"] > 0:
+                    st.write(f"  {r['code']} ({r['name']}): {r['signals']} 个信号")
+
+        st.divider()
+
+        # 信号查询
+        fc1, fc2, fc3 = st.columns(3)
+        with fc1:
+            sig_code = st.text_input("股票代码筛选", placeholder="留空查看全部", key="qd_sig_code")
+        with fc2:
+            sig_type = st.selectbox("信号类型", ["全部", "macd_cross", "rsi_oversold", "rsi_overbought",
+                                                  "kdj_cross", "boll_break", "volume_surge", "price_limit"],
+                                    key="qd_sig_type")
+        with fc3:
+            sig_dir = st.selectbox("方向", ["全部", "bullish", "bearish", "neutral"], key="qd_sig_dir")
+
+        signals = quant_data.get_passive_signals(
+            code=sig_code.strip().upper() if sig_code else None,
+            signal_type=sig_type if sig_type != "全部" else None,
+            direction=sig_dir if sig_dir != "全部" else None,
+            limit=200
+        )
+
+        if signals:
+            st.write(f"**共 {len(signals)} 个信号**")
+            sig_df = pd.DataFrame([{
+                "触发时间": s["trigger_time"],
+                "代码": s["code"],
+                "名称": s.get("name", ""),
+                "信号类型": s["signal_type"],
+                "子类型": s.get("signal_subtype", ""),
+                "方向": "看多" if s["direction"]=="bullish" else ("看空" if s["direction"]=="bearish" else "中性"),
+                "价格": s.get("price", 0),
+                "指标值": round(s.get("indicator_value", 0), 2) if s.get("indicator_value") else "—",
+                "阈值": s.get("threshold", ""),
+                "描述": s.get("description", ""),
+            } for s in signals])
+            st.dataframe(sig_df, use_container_width=True, hide_index=True)
+
+            # 方向分布图
+            dir_counts = sig_df["方向"].value_counts()
+            fig_dir = go.Figure(go.Bar(
+                x=dir_counts.index, y=dir_counts.values,
+                marker_color=["#1DC981" if d=="看多" else "#E8463A" if d=="看空" else "#888" for d in dir_counts.index]
+            ))
+            fig_dir.update_layout(title="信号方向分布", template="plotly_white", height=300,
+                                  xaxis_title="方向", yaxis_title="数量")
+            st.plotly_chart(fig_dir, use_container_width=True)
+
+            # 信号类型分布
+            type_counts = sig_df["信号类型"].value_counts()
+            fig_type = go.Figure(go.Bar(
+                x=type_counts.index, y=type_counts.values,
+                marker_color="#4B3FE3"
+            ))
+            fig_type.update_layout(title="信号类型分布", template="plotly_white", height=300,
+                                   xaxis_title="类型", yaxis_title="数量")
+            st.plotly_chart(fig_type, use_container_width=True)
+        else:
+            st.info("暂无被动信号数据。请先采集日线数据并运行信号检测。")
+
+    # --- Tab 3: 事件管理 ---
+    with quant_tab3:
+        st.subheader("主动事件管理")
+
+        # 添加事件
+        with st.expander("添加主动事件", expanded=True):
+            ec1, ec2, ec3 = st.columns(3)
+            with ec1:
+                ev_code = st.text_input("股票代码", key="ae_code")
+            with ec2:
+                ev_market = st.selectbox("市场", ["A股", "美股", "港股"], key="ae_market")
+            with ec3:
+                ev_time = st.text_input("事件时间", value=datetime.now().strftime('%Y-%m-%d %H:%M:00'),
+                                        key="ae_time")
+
+            ec4, ec5 = st.columns(2)
+            with ec4:
+                ev_type = st.selectbox("事件类型", [
+                    "earnings", "policy", "industry", "announcement", "dividend", "macro"
+                ], format_func=lambda x: {
+                    "earnings": "财报", "policy": "政策", "industry": "行业新闻",
+                    "announcement": "公司公告", "dividend": "分红", "macro": "宏观经济"
+                }[x], key="ae_type")
+            with ec5:
+                ev_subtype = st.text_input("事件子类型", placeholder="如 季报/降息/并购", key="ae_subtype")
+
+            ec6, ec7 = st.columns(2)
+            with ec6:
+                ev_dir = st.selectbox("方向", ["positive", "negative", "neutral"],
+                                       format_func=lambda x: {"positive":"利好","negative":"利空","neutral":"中性"}[x],
+                                       key="ae_dir")
+            with ec7:
+                ev_level = st.selectbox("影响等级", ["critical", "major", "minor"],
+                                        format_func=lambda x: {"critical":"重大","major":"一般","minor":"轻微"}[x],
+                                        key="ae_level")
+
+            ev_title = st.text_input("事件标题", key="ae_title")
+            ev_content = st.text_area("事件内容", key="ae_content")
+            ev_source = st.text_input("来源(URL)", key="ae_source")
+
+            if st.button("添加事件", type="primary", key="ae_add"):
+                if ev_code.strip() and ev_title.strip():
+                    quant_data.add_active_event(
+                        ev_code.strip().upper(), ev_market, "", ev_time,
+                        ev_type, ev_subtype, ev_dir, ev_level, ev_title, ev_content, ev_source
+                    )
+                    st.success(f"事件已添加: {ev_title}")
+                    st.rerun()
+                else:
+                    st.warning("请填写股票代码和事件标题")
+
+        st.divider()
+
+        # 查看事件
+        events = quant_data.get_active_events(limit=100)
+        if events:
+            st.write(f"**共 {len(events)} 个事件**")
+            ev_df = pd.DataFrame([{
+                "ID": e["id"],
+                "时间": e["event_time"],
+                "代码": e["code"],
+                "类型": e["event_type"],
+                "子类型": e.get("event_subtype", ""),
+                "方向": "利好" if e["direction"]=="positive" else ("利空" if e["direction"]=="negative" else "中性"),
+                "等级": {"critical":"重大","major":"一般","minor":"轻微"}.get(e["impact_level"], ""),
+                "标题": e.get("title", ""),
+                "来源": e.get("source", ""),
+            } for e in events])
+            st.dataframe(ev_df, use_container_width=True, hide_index=True)
+
+            # 删除事件
+            del_id = st.number_input("删除事件ID", min_value=1, step=1, key="ae_del_id")
+            if st.button("删除事件", key="ae_del"):
+                quant_data.delete_active_event(int(del_id))
+                st.success(f"已删除事件 ID: {del_id}")
+                st.rerun()
+        else:
+            st.info("暂无主动事件数据")
+
+    # --- Tab 4: 数据概览 ---
+    with quant_tab4:
+        st.subheader("数据概览")
+        coverage = quant_data.get_data_coverage()
+
+        # 总览指标
+        mc1, mc2, mc3, mc4 = st.columns(4)
+        with mc1:
+            st.metric("日线记录数", f"{coverage['total_quotes']:,}")
+        with mc2:
+            st.metric("覆盖股票数", coverage['total_codes'])
+        with mc3:
+            st.metric("被动信号数", coverage['total_signals'])
+        with mc4:
+            st.metric("主动事件数", coverage['total_events'])
+
+        st.write(f"**数据时间范围:** {coverage['date_range']}")
+        st.write(f"**活跃股票池:** {coverage['pool_count']} 只")
+
+        # 按市场分布
+        if coverage.get('by_market'):
+            st.subheader("按市场分布")
+            mk_data = [{"市场": m["market"], "股票数": m["codes"], "日线数": m["rows"]}
+                       for m in coverage['by_market']]
+            st.dataframe(pd.DataFrame(mk_data), use_container_width=True, hide_index=True)
+
+        # 信号统计
+        stats = quant_data.get_signal_stats()
+        if stats['total'] > 0:
+            st.subheader("信号统计")
+            sc1, sc2 = st.columns(2)
+            with sc1:
+                dir_data = [{"方向": "看多" if d["direction"]=="bullish" else "看空" if d["direction"]=="bearish" else "中性",
+                             "数量": d["c"]} for d in stats['by_direction']]
+                st.dataframe(pd.DataFrame(dir_data), use_container_width=True, hide_index=True)
+            with sc2:
+                type_data = [{"类型": t["signal_type"], "子类型": t.get("signal_subtype",""),
+                             "数量": t["c"]} for t in stats['by_type']]
+                st.dataframe(pd.DataFrame(type_data), use_container_width=True, hide_index=True)
+
+        # 有数据的股票列表
+        stocks_with_data = quant_data.get_stock_list_with_data()
+        if stocks_with_data:
+            st.subheader("已有日线数据的股票")
+            sd_df = pd.DataFrame([{
+                "代码": s["code"],
+                "市场": s["market"],
+                "天数": s["days"],
+                "起始日": s["start"],
+                "截止日": s["end"],
+            } for s in stocks_with_data])
+            st.dataframe(sd_df, use_container_width=True, hide_index=True)
+
+            # 选择股票查看日线图
+            st.divider()
+            st.subheader("日线行情图")
+            sel_stock = st.selectbox("选择股票", [s["code"] for s in stocks_with_data], key="qd_chart_sel")
+            if sel_stock:
+                df_q = quant_data.get_daily_quotes(sel_stock, days=250)
+                if not df_q.empty:
+                    df_q = quant_data.calc_all_indicators(df_q)
+                    fig_q = make_subplots(rows=2, cols=1, shared_xaxes=True,
+                                         row_heights=[0.7, 0.3], vertical_spacing=0.05)
+                    fig_q.add_trace(go.Candlestick(
+                        x=df_q['date'], open=df_q['open'], high=df_q['high'],
+                        low=df_q['low'], close=df_q['close'],
+                        increasing_line_color='#1DC981', decreasing_line_color='#E8463A',
+                        name='K线'
+                    ), row=1, col=1)
+                    if 'MA20' in df_q.columns:
+                        fig_q.add_trace(go.Scatter(
+                            x=df_q['date'], y=df_q['MA20'],
+                            mode='lines', name='MA20',
+                            line=dict(color='#4B3FE3', width=1)
+                        ), row=1, col=1)
+                    vol_colors = ['#1DC981' if c >= o else '#E8463A'
+                                  for c, o in zip(df_q['close'], df_q['open'])]
+                    fig_q.add_trace(go.Bar(
+                        x=df_q['date'], y=df_q['volume'], name='成交量',
+                        marker_color=vol_colors, showlegend=False
+                    ), row=2, col=1)
+                    fig_q.update_layout(title=f"{sel_stock} 日线行情", template="plotly_white", height=500)
+                    fig_q.update_yaxes(title_text="价格", row=1, col=1)
+                    fig_q.update_yaxes(title_text="成交量", row=2, col=1)
+                    fig_q.update_xaxes(rangeslider_visible=False)
+                    st.plotly_chart(fig_q, use_container_width=True)
+        else:
+            st.info("暂无日线数据，请先在数据采集标签页中采集")
 
 elif page == "数据库浏览":
     import tracker
