@@ -391,8 +391,8 @@ def render_realtime_section(market: str, input_key: str, default_symbol: str,
 
     col_input, col_refresh = st.columns([5, 2])
     with col_input:
-        stock_symbol = st.text_input(
-            "股票代码", value=default_symbol,
+        stock_input = st.text_input(
+            "股票代码（多个用逗号分隔）", value=default_symbol,
             placeholder=placeholder_text,
             key=input_key,
         )
@@ -402,7 +402,47 @@ def render_realtime_section(market: str, input_key: str, default_symbol: str,
         auto_refresh = st.toggle("自动刷新", value=True, help="开启后每5秒自动刷新报价",
                                 key=f"auto_refresh_{input_key}")
 
-    symbol = stock_symbol.strip().upper()
+    symbols = [s.strip().upper() for s in stock_input.split(",") if s.strip()]
+    if not symbols:
+        st.warning("请输入至少一个股票代码")
+        return
+
+    # --- 多股票概览表 ---
+    if len(symbols) > 1:
+        st.subheader("多股票概览")
+        summary_data = []
+        with st.spinner("获取多股票报价..."):
+            for sym in symbols:
+                q = fetch_fn(sym)
+                if q:
+                    currency = "$" if market == "美股" else ("HK$" if market == "港股" else "")
+                    unit = "股" if market in ("A股", "港股") else ""
+                    pct = q.get("change_pct", 0)
+                    arrow = "🔺" if pct > 0 else ("🔻" if pct < 0 else "➖")
+                    summary_data.append({
+                        "代码": sym,
+                        "名称": q.get("name", ""),
+                        "最新价": f"{currency}{q['price']:.2f}",
+                        "涨跌幅": f"{arrow} {pct:+.2f}%",
+                        "成交量": f"{q.get('volume', 0):,}{unit}",
+                        "状态": q.get("market_status", ""),
+                    })
+                else:
+                    summary_data.append({
+                        "代码": sym, "名称": "—", "最新价": "—",
+                        "涨跌幅": "—", "成交量": "—", "状态": "获取失败",
+                    })
+        df_summary = pd.DataFrame(summary_data)
+        st.dataframe(df_summary, use_container_width=True, hide_index=True)
+        st.divider()
+        selected_symbol = st.selectbox(
+            "选择查看详情的股票", symbols,
+            key=f"detail_select_{input_key}",
+        )
+    else:
+        selected_symbol = symbols[0]
+
+    symbol = selected_symbol
 
     # --- 实时报价 ---
     if auto_refresh:
@@ -411,7 +451,8 @@ def render_realtime_section(market: str, input_key: str, default_symbol: str,
 
         @st.fragment(run_every=timedelta(seconds=5))
         def _refresh_realtime():
-            sym = st.session_state.get(input_key, default_symbol).strip().upper()
+            sel_key = f"detail_select_{input_key}"
+            sym = st.session_state.get(sel_key, symbol).strip().upper() if len(symbols) > 1 else st.session_state.get(input_key, default_symbol).strip().upper()
             quote = fetch_fn(sym)
             if not quote:
                 refresh_placeholder.warning(f"无法获取 {sym} 的实时报价,等待重试...")
@@ -701,7 +742,7 @@ if page == "实时查询":
         render_realtime_section(
             market="美股",
             input_key="us_stock_input",
-            default_symbol="AAPL",
+            default_symbol="AAPL, TSLA, GOOGL",
             placeholder_text="输入美股代码,如 AAPL, TSLA, GOOGL",
             fetch_fn=fetch_us_realtime,
             rt_prefix="us_rt",
@@ -711,7 +752,7 @@ if page == "实时查询":
         render_realtime_section(
             market="港股",
             input_key="hk_stock_input",
-            default_symbol="00700",
+            default_symbol="00700, 09988, 03690",
             placeholder_text="输入港股代码,如 00700, 09988, 03690",
             fetch_fn=fetch_hk_realtime,
             rt_prefix="hk_rt",
@@ -721,7 +762,7 @@ if page == "实时查询":
         render_realtime_section(
             market="A股",
             input_key="a_stock_input",
-            default_symbol="600000",
+            default_symbol="600000, 000001, 300750",
             placeholder_text="输入A股代码,如 600000, 000001, 300750",
             fetch_fn=fetch_a_share_realtime,
             rt_prefix="a_rt",
