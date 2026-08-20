@@ -223,6 +223,23 @@ def init_db():
     c.execute("CREATE INDEX IF NOT EXISTS idx_snap_code ON price_snapshots(code)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_snap_ts ON price_snapshots(timestamp)")
     c.execute("CREATE INDEX IF NOT EXISTS idx_sig_ts ON signal_events(timestamp)")
+    c.execute("""CREATE TABLE IF NOT EXISTS app_settings (
+        key TEXT PRIMARY KEY, value TEXT
+    )""")
+    conn.commit()
+    conn.close()
+
+
+def get_setting(key, default=None):
+    conn = get_db()
+    row = conn.execute("SELECT value FROM app_settings WHERE key=?", (key,)).fetchone()
+    conn.close()
+    return row['value'] if row else default
+
+
+def set_setting(key, value):
+    conn = get_db()
+    conn.execute("INSERT OR REPLACE INTO app_settings(key, value) VALUES(?,?)", (key, str(value)))
     conn.commit()
     conn.close()
 
@@ -305,9 +322,15 @@ def check_triggers(code, market, name, quote, prev,
     price = quote.get('price', 0)
 
     if price_threshold is None:
-        price_threshold = st.session_state.get('trigger_price_threshold', 5.0)
+        try:
+            price_threshold = float(get_setting('trigger_price_threshold', 5.0))
+        except:
+            price_threshold = 5.0
     if volume_ratio is None:
-        volume_ratio = st.session_state.get('trigger_volume_ratio', 2.0)
+        try:
+            volume_ratio = float(get_setting('trigger_volume_ratio', 2.0))
+        except:
+            volume_ratio = 2.0
 
     if abs(change_pct) >= price_threshold:
         direction = "大涨" if change_pct > 0 else "大跌"
@@ -408,6 +431,46 @@ def get_snapshot_count(code=None):
 
 
 # ============================================================
+# 后台线程追踪 (独立于浏览器 WebSocket)
+# ============================================================
+
+_tracking_thread = None
+_tracking_stop_event = threading.Event()
+_tracking_status = {'last_run': '', 'last_stocks': 0, 'last_signals': 0, 'errors': 0}
+
+
+def _background_worker(interval=300):
+    init_db()
+    while not _tracking_stop_event.is_set():
+        try:
+            result = run_tracking_cycle()
+            _tracking_status['last_run'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            _tracking_status['last_stocks'] = result.get('stocks', 0)
+            _tracking_status['last_signals'] = result.get('signals', 0)
+        except Exception as e:
+            _tracking_status['errors'] += 1
+        _tracking_stop_event.wait(interval)
+
+
+def start_background_tracking(interval=300):
+    global _tracking_thread
+    if _tracking_thread and _tracking_thread.is_alive():
+        return
+    _tracking_stop_event.clear()
+    _tracking_thread = threading.Thread(target=_background_worker, args=(interval,), daemon=True)
+    _tracking_thread.start()
+
+
+def stop_background_tracking():
+    _tracking_stop_event.set()
+
+
+def is_tracking_running():
+    global _tracking_thread
+    return _tracking_thread is not None and _tracking_thread.is_alive()
+
+
+# ============================================================
 # 追踪页面 UI
 # ============================================================
 
@@ -493,22 +556,31 @@ def render_tracking_page():
                 help="成交量与前值比值超过此倍数时触发信号（默认 2.0 倍）",
                 key="trigger_volume_ratio"
             )
+        if st.button("保存阈值设置", key="save_thresholds"):
+            set_setting('trigger_price_threshold', price_thresh)
+            set_setting('trigger_volume_ratio', vol_ratio)
+            st.success("阈值已保存! 后台追踪将使用新阈值")
         st.caption(f"当前阈值: 涨跌幅 ±{price_thresh}% | 成交量放大 {vol_ratio} 倍")
+        saved_p = get_setting('trigger_price_threshold', '5.0')
+        saved_v = get_setting('trigger_volume_ratio', '2.0')
+        st.caption(f"已保存的阈值: 涨跌幅 ±{saved_p}% | 成交量放大 {saved_v} 倍")
 
         st.divider()
 
         st.subheader("追踪控制")
-        tracking_active = st.session_state.get('tracking_active', False)
+        tracking_active = is_tracking_running()
 
         cc1, cc2, cc3 = st.columns([1, 1, 2])
         with cc1:
             if not tracking_active:
                 if st.button("开始追踪", type="primary", key="start_track"):
-                    st.session_state['tracking_active'] = True
+                    set_setting('tracking_active', 'true')
+                    start_background_tracking(interval=300)
                     st.rerun()
             else:
                 if st.button("停止追踪", type="secondary", key="stop_track"):
-                    st.session_state['tracking_active'] = False
+                    set_setting('tracking_active', 'false')
+                    stop_background_tracking()
                     st.rerun()
         with cc2:
             if st.button("立即采集一次", key="manual_collect"):
@@ -525,10 +597,14 @@ def render_tracking_page():
                 st.rerun()
 
         if tracking_active:
-            st.success("追踪运行中 — 每 5 分钟自动采集")
-            _auto_tracking_fragment()
+            st.success("后台追踪运行中 — 每 5 分钟自动采集，关闭页面也不中断")
+            st.caption(f"上次采集: {_tracking_status.get('last_run', 'N/A')} | 采集股票数: {_tracking_status.get('last_stocks', 0)} | 错误次数: {_tracking_status.get('errors', 0)}")
+            # 如果上次有信号, 刷新显示
+            last_run = _tracking_status.get('last_run', '')
+            if last_run:
+                st.info(f"最近一次采集: {last_run} | 股票: {_tracking_status['last_stocks']} | 新信号: {_tracking_status['last_signals']}")
         else:
-            st.caption("点击「开始追踪」开启自动采集，或「立即采集一次」手动执行")
+            st.caption("点击「开始追踪」开启后台自动采集（关闭页面也不中断），或「立即采集一次」手动执行")
 
     # ---- Tab 2: 被动信号事件 ----
     with tab2:
@@ -587,14 +663,8 @@ def render_tracking_page():
                                  use_container_width=True, hide_index=True)
 
 
-@st.fragment(run_every=timedelta(seconds=300))
-def _auto_tracking_fragment():
-    if not st.session_state.get('tracking_active', False):
-        return
-    with st.spinner("正在采集数据..."):
-        result = run_tracking_cycle()
-    if result['stocks'] > 0:
-        st.toast(f"采集完成: {result['stocks']} 只股票, 新增 {result['signals']} 个信号")
+# @st.fragment 方式已弃用, 改为后台线程 (见上方 _background_worker)
+# 后台线程不依赖浏览器 WebSocket 连接, 关闭页面也不中断
 
 
 # ============================================================
