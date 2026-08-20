@@ -205,8 +205,18 @@ def init_db():
     conn = get_db()
     c = conn.cursor()
     c.execute("""CREATE TABLE IF NOT EXISTS tracked_stocks (
-        code TEXT PRIMARY KEY, market TEXT NOT NULL, name TEXT, added_at TEXT
+        code TEXT PRIMARY KEY, market TEXT NOT NULL, name TEXT, added_at TEXT,
+        price_threshold REAL DEFAULT 5.0, volume_ratio REAL DEFAULT 2.0
     )""")
+    # 兼容旧表: 如果列不存在则添加
+    try:
+        c.execute("ALTER TABLE tracked_stocks ADD COLUMN price_threshold REAL DEFAULT 5.0")
+    except:
+        pass
+    try:
+        c.execute("ALTER TABLE tracked_stocks ADD COLUMN volume_ratio REAL DEFAULT 2.0")
+    except:
+        pass
     c.execute("""CREATE TABLE IF NOT EXISTS price_snapshots (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         code TEXT NOT NULL, market TEXT NOT NULL,
@@ -248,11 +258,22 @@ def set_setting(key, value):
 # 追踪股票管理
 # ============================================================
 
-def add_tracked_stock(code, market, name=""):
+def add_tracked_stock(code, market, name="", price_threshold=5.0, volume_ratio=2.0):
     conn = get_db()
     conn.execute(
-        "INSERT OR REPLACE INTO tracked_stocks(code, market, name, added_at) VALUES(?,?,?,?)",
-        (code.strip().upper(), market, name, datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+        "INSERT OR REPLACE INTO tracked_stocks(code, market, name, added_at, price_threshold, volume_ratio) VALUES(?,?,?,?,?,?)",
+        (code.strip().upper(), market, name, datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+         price_threshold, volume_ratio)
+    )
+    conn.commit()
+    conn.close()
+
+
+def update_stock_thresholds(code, price_threshold, volume_ratio):
+    conn = get_db()
+    conn.execute(
+        "UPDATE tracked_stocks SET price_threshold=?, volume_ratio=? WHERE code=?",
+        (price_threshold, volume_ratio, code)
     )
     conn.commit()
     conn.close()
@@ -322,15 +343,9 @@ def check_triggers(code, market, name, quote, prev,
     price = quote.get('price', 0)
 
     if price_threshold is None:
-        try:
-            price_threshold = float(get_setting('trigger_price_threshold', 5.0))
-        except:
-            price_threshold = 5.0
+        price_threshold = 5.0
     if volume_ratio is None:
-        try:
-            volume_ratio = float(get_setting('trigger_volume_ratio', 2.0))
-        except:
-            volume_ratio = 2.0
+        volume_ratio = 2.0
 
     if abs(change_pct) >= price_threshold:
         direction = "大涨" if change_pct > 0 else "大跌"
@@ -379,7 +394,10 @@ def run_tracking_cycle():
         prev = get_latest_snapshot(stock['code'])
         save_price_snapshot(stock['code'], stock['market'], quote)
 
-        signals = check_triggers(stock['code'], stock['market'], name, quote, prev)
+        stock_pt = stock.get('price_threshold', 5.0)
+        stock_vr = stock.get('volume_ratio', 2.0)
+        signals = check_triggers(stock['code'], stock['market'], name, quote, prev,
+                                  price_threshold=stock_pt, volume_ratio=stock_vr)
         for sig in signals:
             save_signal_event(stock['code'], stock['market'], name,
                               sig['signal_type'], sig['description'],
@@ -490,18 +508,22 @@ def render_tracking_page():
     # ---- Tab 1: 追踪管理 ----
     with tab1:
         st.subheader("添加追踪股票")
-        add_col1, add_col2, add_col3 = st.columns([2, 1, 1])
+        add_col1, add_col2, add_col3, add_col4, add_col5 = st.columns([2, 1, 1, 1, 1])
         with add_col1:
             new_code = st.text_input("股票代码", placeholder="如 600000 / AAPL / 00700", key="track_add_code")
         with add_col2:
             new_market = st.selectbox("市场", ["A股", "美股", "港股"], key="track_add_market")
         with add_col3:
+            new_pt = st.number_input("涨跌幅阈值(%)", min_value=0.1, max_value=20.0, value=5.0, step=0.5, key="track_add_pt")
+        with add_col4:
+            new_vr = st.number_input("成交量倍数", min_value=1.1, max_value=10.0, value=2.0, step=0.1, key="track_add_vr")
+        with add_col5:
             st.write("")
             st.write("")
             if st.button("添加追踪", type="primary", key="track_add_btn"):
                 if new_code.strip():
-                    add_tracked_stock(new_code, new_market)
-                    st.success(f"已添加: {new_code.strip().upper()} ({new_market})")
+                    add_tracked_stock(new_code, new_market, price_threshold=new_pt, volume_ratio=new_vr)
+                    st.success(f"已添加: {new_code.strip().upper()} ({new_market}) 阈值:±{new_pt}%/{new_vr}倍")
                     st.rerun()
 
         st.divider()
@@ -514,7 +536,7 @@ def render_tracking_page():
             for stock in stocks:
                 snap = get_latest_snapshot(stock['code'])
                 snap_count = get_snapshot_count(stock['code'])
-                sc1, sc2, sc3, sc4 = st.columns([2, 1.5, 1, 0.5])
+                sc1, sc2, sc3, sc4, sc5 = st.columns([2, 1.2, 1.5, 1.3, 0.5])
                 with sc1:
                     name_display = stock.get('name') or '名称待获取'
                     st.write(f"**{stock['code']}** ({stock['market']}) {name_display}")
@@ -526,13 +548,27 @@ def render_tracking_page():
                     else:
                         st.metric("最新价", "—", "无数据")
                 with sc3:
+                    cur_pt = stock.get('price_threshold', 5.0)
+                    cur_vr = stock.get('volume_ratio', 2.0)
+                    pt_input = st.number_input(
+                        "涨幅阈值(%)", min_value=0.1, max_value=20.0,
+                        value=float(cur_pt), step=0.5,
+                        key=f"pt_{stock['code']}")
+                    vr_input = st.number_input(
+                        "量能倍数", min_value=1.1, max_value=10.0,
+                        value=float(cur_vr), step=0.1,
+                        key=f"vr_{stock['code']}")
+                    if pt_input != float(cur_pt) or vr_input != float(cur_vr):
+                        update_stock_thresholds(stock['code'], pt_input, vr_input)
+                        st.toast(f"{stock['code']} 阈值已更新: ±{pt_input}% / {vr_input}倍")
+                with sc4:
                     if snap:
                         st.caption(f"状态: {snap.get('market_status', 'N/A')}")
                         ts = snap.get('timestamp', '')
                         st.caption(f"采集: {ts[-8:] if ts else 'N/A'}")
                     else:
                         st.caption("尚未采集")
-                with sc4:
+                with sc5:
                     st.write("")
                     if st.button("删除", key=f"del_{stock['code']}"):
                         remove_tracked_stock(stock['code'])
@@ -540,30 +576,7 @@ def render_tracking_page():
 
         st.divider()
 
-        st.subheader("被动埋点触发设置")
-        tc1, tc2 = st.columns(2)
-        with tc1:
-            price_thresh = st.number_input(
-                "涨跌幅阈值 (%)",
-                min_value=0.1, max_value=20.0, value=5.0, step=0.5,
-                help="涨跌幅超过此值时触发信号（默认 5%）",
-                key="trigger_price_threshold"
-            )
-        with tc2:
-            vol_ratio = st.number_input(
-                "成交量放大倍数",
-                min_value=1.1, max_value=10.0, value=2.0, step=0.1,
-                help="成交量与前值比值超过此倍数时触发信号（默认 2.0 倍）",
-                key="trigger_volume_ratio"
-            )
-        if st.button("保存阈值设置", key="save_thresholds"):
-            set_setting('trigger_price_threshold', price_thresh)
-            set_setting('trigger_volume_ratio', vol_ratio)
-            st.success("阈值已保存! 后台追踪将使用新阈值")
-        st.caption(f"当前阈值: 涨跌幅 ±{price_thresh}% | 成交量放大 {vol_ratio} 倍")
-        saved_p = get_setting('trigger_price_threshold', '5.0')
-        saved_v = get_setting('trigger_volume_ratio', '2.0')
-        st.caption(f"已保存的阈值: 涨跌幅 ±{saved_p}% | 成交量放大 {saved_v} 倍")
+        st.caption("提示: 每只股票的被动埋点阈值可在上方股票列表中独立设置")
 
         st.divider()
 
