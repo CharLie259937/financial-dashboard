@@ -25,6 +25,13 @@ conn = sqlite3.connect(qd.DB_PATH)
 conn.row_factory = sqlite3.Row
 cur = conn.cursor()
 
+# 模块8起存在多批次(2026-09-03冻结批 vs 扩窗批), 全部对账限定最新批次;
+# 同日重跑由引擎先清同日旧批(幂等), 因此最新 run_date 恰好一批
+RD = cur.execute("SELECT MAX(run_date) FROM backtest_runs").fetchone()[0]
+n_batches = cur.execute(
+    "SELECT COUNT(DISTINCT run_date) FROM backtest_runs").fetchone()[0]
+print(f"  最新批次 run_date={RD} (库内共 {n_batches} 个批次, 对账仅看最新)")
+
 print()
 print("[2] 表结构与行数对账")
 tabs = sorted(r[0] for r in cur.execute(
@@ -33,22 +40,27 @@ tabs = sorted(r[0] for r in cur.execute(
 check('4张回测表存在',
       tabs == ['backtest_equity', 'backtest_meta', 'backtest_runs', 'backtest_trades'],
       str(tabs))
-n_runs = cur.execute("SELECT COUNT(*) FROM backtest_runs").fetchone()[0]
-check('runs行数 = 策略×费率×2段 + 双基准×2段', n_runs == expect_runs,
+n_runs = cur.execute(
+    "SELECT COUNT(*) FROM backtest_runs WHERE run_date=?", (RD,)).fetchone()[0]
+check('最新批次runs行数 = 策略×费率×2段 + 双基准×2段', n_runs == expect_runs,
       f'{n_runs} vs {expect_runs}')
 n_s3 = sum(cur.execute(
     f"SELECT COUNT(*) FROM {t} WHERE strategy_id='S3'").fetchone()[0]
     for t in ['backtest_runs', 'backtest_trades'])
 check('S3已彻底清除(2026-09-02删除, runs/trades零残留)', n_s3 == 0, f'残留{n_s3}行')
 seg_days = dict(cur.execute(
-    "SELECT segment, n_days FROM backtest_runs WHERE strategy_id='B1' AND fee=0"
-).fetchall())
+    "SELECT segment, n_days FROM backtest_runs "
+    "WHERE strategy_id='B1' AND fee=0 AND run_date=?", (RD,)).fetchall())
 runs_per_seg = n_strat * len(qd.BT_FEE_SENSITIVITY) + 2
-n_eq = cur.execute("SELECT COUNT(*) FROM backtest_equity").fetchone()[0]
+n_eq = cur.execute(
+    "SELECT COUNT(*) FROM backtest_equity e JOIN backtest_runs r ON e.run_id=r.run_id "
+    "WHERE r.run_date=?", (RD,)).fetchone()[0]
 expect_eq = (seg_days['full'] + seg_days['oos']) * runs_per_seg
-check('equity行数 = Σ(段日历天数 × 该段run数)', n_eq == expect_eq,
+check('最新批次equity行数 = Σ(段日历天数 × 该段run数)', n_eq == expect_eq,
       f'{n_eq} vs {expect_eq} (full {seg_days["full"]}日/oos {seg_days["oos"]}日)')
-n_tr = cur.execute("SELECT COUNT(*) FROM backtest_trades").fetchone()[0]
+n_tr = cur.execute(
+    "SELECT COUNT(*) FROM backtest_trades t JOIN backtest_runs r ON t.run_id=r.run_id "
+    "WHERE r.run_date=?", (RD,)).fetchone()[0]
 check('交易明细已入库', n_tr > 0, f'{n_tr}行')
 
 print()
@@ -56,7 +68,7 @@ print("[3] oos 段完整性: 策略首日净值=1 / 行数=n_days / 首日>知�
 bad_first, bad_len = [], []
 for r in cur.execute(
         "SELECT run_id, strategy_id, kind, n_days FROM backtest_runs "
-        "WHERE segment='oos'").fetchall():
+        "WHERE segment='oos' AND run_date=?", (RD,)).fetchall():
     rows = cur.execute(
         "SELECT trade_date, strategy_value FROM backtest_equity "
         "WHERE run_id=? ORDER BY trade_date", (r['run_id'],)).fetchall()
@@ -69,7 +81,8 @@ check('策略run首日净值=1(oos空仓起步)', not bad_first,
 check('每run净值行数=n_days', not bad_len, ','.join(sorted(set(bad_len))) or '全部一致')
 oos_start = cur.execute(
     "SELECT MIN(e.trade_date) FROM backtest_equity e "
-    "JOIN backtest_runs r ON e.run_id=r.run_id WHERE r.segment='oos'").fetchone()[0]
+    "JOIN backtest_runs r ON e.run_id=r.run_id "
+    "WHERE r.segment='oos' AND r.run_date=?", (RD,)).fetchone()[0]
 check('oos首日 > 知识截止日 2026-05-01', oos_start > qd.BT_KNOWLEDGE_CUTOFF, oos_start)
 
 print()
@@ -79,7 +92,8 @@ for seg in ('full', 'oos'):
     for sid in qd.BT_STRATEGIES:
         rets = {r['fee']: r['total_return'] for r in cur.execute(
             "SELECT fee, total_return FROM backtest_runs "
-            "WHERE segment=? AND strategy_id=? AND kind='strategy'", (seg, sid)).fetchall()}
+            "WHERE segment=? AND strategy_id=? AND kind='strategy' AND run_date=?",
+            (seg, sid, RD)).fetchall()}
         if (len(rets) == 3
                 and not (rets[0.0] >= rets[0.001] - 1e-12
                          and rets[0.001] >= rets[0.003] - 1e-12)):
@@ -88,8 +102,8 @@ check(f'{n_strat}策略×2段费率档全单调', not viol, ','.join(viol) or '�
 
 print()
 print("[5] 触发数独立对账 (回测 n_triggers vs 信号/事件表 SQL 计数)")
-print("    口径对齐: 触发日须有当日行情(宽表 open/close 非空)——引擎同款条件;")
-print("    宽表起点(2025-08-21)前的早期信号与未来日期事件(如预告财报)不计入")
+print("    口径对齐: 触发日须有当日行情(宽表 open/close 非空)——引擎同款条件;"
+    " 模块8回放后宽表覆盖全窗口(2018-06起), 早期信号计入对账")
 HAS_Q = (" AND EXISTS (SELECT 1 FROM daily_feature_base f "
          "WHERE f.code=t.code AND f.trade_date=t.trade_date "
          "AND f.open IS NOT NULL AND f.close IS NOT NULL)")
@@ -113,7 +127,8 @@ for seg in ('full', 'oos'):
                 [spec['event_type']] + date_args).fetchone()[0]
         bt_n = cur.execute(
             "SELECT n_triggers FROM backtest_runs "
-            "WHERE segment=? AND strategy_id=? AND fee=0", (seg, sid)).fetchone()[0]
+            "WHERE segment=? AND strategy_id=? AND fee=0 AND run_date=?",
+            (seg, sid, RD)).fetchone()[0]
         check(f'{sid} {seg}段触发数', bt_n == sql_n, f'回测{bt_n} vs SQL{sql_n}')
 
 print()
@@ -123,7 +138,8 @@ print(f"{'对象':<26}{'FULL收益':>9}{'OOS收益':>9}{'OOS年化':>9}"
 order = list(qd.BT_STRATEGIES) + ['B1', 'B2']
 for sid in order:
     rows = {r['segment']: r for r in cur.execute(
-        "SELECT * FROM backtest_runs WHERE strategy_id=? AND fee=0", (sid,)).fetchall()}
+        "SELECT * FROM backtest_runs WHERE strategy_id=? AND fee=0 AND run_date=?",
+        (sid, RD)).fetchall()}
     f, o = rows['full'], rows['oos']
     print(f"{sid} {f['strategy_name'][:12]:<14}"
           f"{f['total_return']*100:>8.2f}%{o['total_return']*100:>8.2f}%"
@@ -172,7 +188,8 @@ res = qd.run_backtest('S2', qd.BT_MAX_POSITIONS, 0.0,
                       start_date=qd.BT_KNOWLEDGE_CUTOFF)
 db = cur.execute(
     "SELECT total_return, n_trades FROM backtest_runs "
-    "WHERE strategy_id='S2' AND segment='oos' AND fee=0").fetchone()
+    "WHERE strategy_id='S2' AND segment='oos' AND fee=0 AND run_date=?",
+    (RD,)).fetchone()
 check('总收益一致(容差1e-9)',
       abs(res['metrics']['total_return'] - db['total_return']) < 1e-9,
       f"{res['metrics']['total_return']:.8f} vs {db['total_return']:.8f}")

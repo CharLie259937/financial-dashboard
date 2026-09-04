@@ -6,6 +6,7 @@
 
 import streamlit as st
 import pandas as pd
+import json
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import requests
@@ -1053,6 +1054,84 @@ elif page == "量化分析":
             else:
                 st.warning(f"未找到 {wt_code.strip()} 的宽表数据，请先生成宽表。")
 
+        st.divider()
+
+        # --- 模块8: 历史回填 ---
+        st.subheader("🧱 历史回填与信号回放（模块 8）")
+        st.caption(
+            f"行情回填至 {quant_data.QUOTE_BACKFILL_START}（多回 1 年做指标预热）· "
+            f"信号回放自 {quant_data.REPLAY_START}（source=replay，与实采 live 双口径分离）· "
+            "回测冻结协议：数据扩展允许，参数/池/策略变更禁止")
+
+        bf_status = quant_data.get_backfill_status()
+        bf_c1, bf_c2 = st.columns(2)
+        with bf_c1:
+            st.write("**行情覆盖（当前池）**")
+            st.dataframe(pd.DataFrame([{
+                "代码": s['code'], "市场": s['market'], "行数": s['n'],
+                "起点": s['s'], "终点": s['e'],
+            } for s in bf_status['stocks']]), use_container_width=True, hide_index=True)
+            st.caption(
+                f"指标 {bf_status['indicators']['rows']} 行 · "
+                f"宽表 {bf_status['wide']['rows']} 行（{bf_status['wide']['start']} ~ {bf_status['wide']['end']}）")
+        with bf_c2:
+            st.write("**信号来源分布**")
+            st.dataframe(pd.DataFrame([{
+                "来源": s['source'], "条数": s['n'],
+                "起点": s['s'], "终点": s['e'],
+            } for s in bf_status['signal_sources']] or [{"来源": "—", "条数": 0, "起点": "—", "终点": "—"}]),
+                use_container_width=True, hide_index=True)
+            m = bf_status['macro']
+            st.caption(
+                f"宏观日历 {m['rows']} 行（{m['start']} ~ {m['end']}，{m['days']} 天）· "
+                f"回填目标 {quant_data.MACRO_BACKFILL_TARGET}（源深度限制）")
+
+        bf_btn1, bf_btn2 = st.columns(2)
+        with bf_btn1:
+            if st.button("▶️ 回填行情+回放信号+重建宽表", type="primary", key="m8_backfill"):
+                with st.status("模块8 回填链运行中...", expanded=True) as m8_status:
+                    def _m8_log(msg):
+                        st.write(str(msg))
+                    try:
+                        rep = quant_data.run_m8_backfill_chain(log=_m8_log)
+                        m8_status.update(
+                            label=(f"✅ 回填链完成：行情 3 股 · 回放新增 "
+                                   f"{rep['replay']['new_inserted']} 条信号"),
+                            state="complete", expanded=False)
+                        st.rerun()
+                    except Exception as e:
+                        m8_status.update(label="❌ 回填链异常终止", state="error", expanded=True)
+                        st.exception(e)
+        with bf_btn2:
+            if st.button("🔁 模块3 三口径重算（含 RSI24 时间分割）", key="m8_m3"):
+                with st.spinner("三口径统计 + RSI24 时间分割验证中..."):
+                    try:
+                        m3r = quant_data.run_module3_analysis()
+                        v = m3r.get('rsi24_verdict', {}).get('signals', {})
+                        parts = [f"{k}: {x.get('verdict')}" for k, x in v.items()]
+                        st.success("模块3 三口径重算完成 · RSI24 判定: " + "；".join(parts))
+                    except Exception as e:
+                        st.error(f"重算失败: {e}")
+
+        st.caption("宏观日历回填（2023-01 起，约 940 天 × 3.5s ≈ 55 分钟）以独立后台进程执行，"
+                   "幂等可断点续采，不阻塞页面")
+        if st.button("🌍 启动宏观日历回填（后台）", key="m8_macro"):
+            import subprocess
+            import sys
+            import os
+            try:
+                qd_dir = os.path.dirname(os.path.abspath(quant_data.__file__))
+                logf = open(os.path.join(qd_dir, "macro_backfill.log"), "a", encoding="utf-8")
+                subprocess.Popen(
+                    [sys.executable, "-c",
+                     "import quant_data;quant_data.backfill_macro_events("
+                     "start=quant_data.MACRO_BACKFILL_TARGET)"],
+                    cwd=qd_dir, stdout=logf, stderr=subprocess.STDOUT)
+                st.success("宏观回填已在后台启动 · 进度见 macro_backfill.log · "
+                           "刷新本页可在上方「宏观日历」覆盖区间看到扩展")
+            except Exception as e:
+                st.error(f"后台启动失败: {e}")
+
     # --- Tab 2: 信号检测 ---
     with quant_tab2:
         st.subheader("被动信号检测")
@@ -1097,7 +1176,7 @@ elif page == "量化分析":
                 "子类型": s.get("signal_subtype", ""),
                 "方向": "看多" if s["direction"]=="bullish" else ("看空" if s["direction"]=="bearish" else "中性"),
                 "价格": s.get("price", 0),
-                "指标值": round(s.get("indicator_value", 0), 2) if s.get("indicator_value") else "—",
+                "指标值": round(s["indicator_value"], 2) if s.get("indicator_value") else None,
                 "阈值": s.get("threshold", ""),
                 "描述": s.get("description", ""),
             } for s in signals])
@@ -2010,9 +2089,10 @@ elif page == "量化分析":
 
         n_bt_runs = _bt_runs_count()
         with st.expander("⚙️ 回测运行管理", expanded=(n_bt_runs == 0)):
-            st.caption("D2 批量回测 = 7策略×2段(full/oos)×3费率 + 双基准×2段, 整批重建 backtest_* 四表;"
+            st.caption("D2 批量回测 = 7策略×2段(full/oos)×3费率 + 双基准×2段, 多批次入库:"
+                       " 跨日批次保留作对照(如 模块8扩窗批次 vs 2026-09-03冻结批次), 同日重跑只覆盖当日批次;"
                        " 选型参数已按 D2.0 协议冻结(2026-08-31), 重跑只刷新数据不改选型;"
-                       " forward 样本(2026-09起)以 run_date 追加式入库, 不受重建影响")
+                       " forward 样本(2026-09起)以 run_date 追加式入库, 不受影响")
             if st.button("运行 / 重跑 D2 批量回测", type="primary", key="qp_run_d2"):
                 with st.spinner("正在执行批量回测并入库(约1-2分钟)..."):
                     try:
@@ -2026,7 +2106,26 @@ elif page == "量化分析":
         if n_bt_runs == 0:
             st.info("回测结果为空: 展开上方「回测运行管理」点击运行按钮(需行情/信号/基准数据齐备)")
         else:
-            # ---- 数据装载(单连接读全, 重启后直接从库回读) ----
+            # ---- 批次选择(模块8 多批次对照模式) ----
+            conn = quant_data.get_db()
+            try:
+                batches = conn.execute(
+                    "SELECT run_date, COUNT(*) n, MIN(start_date) s, MAX(end_date) e "
+                    "FROM backtest_runs GROUP BY run_date ORDER BY run_date DESC").fetchall()
+            finally:
+                conn.close()
+            if len(batches) > 1:
+                bsel = st.selectbox(
+                    "结果批次(默认最新)", list(range(len(batches))), index=0,
+                    key="qp_bt_batch",
+                    format_func=lambda i: f"{batches[i]['run_date']} · {batches[i]['s']} ~ {batches[i]['e']}")
+                bt_batch_date = batches[bsel]['run_date']
+                st.caption(f"共 {len(batches)} 个批次: 跨日批次保留作对照, 同日重跑只覆盖当日; "
+                           "冻结批次(旧窗口)与扩窗批次(模块8)的差异即为样本扩展的影响")
+            else:
+                bt_batch_date = batches[0]['run_date']
+
+            # ---- 数据装载(按所选批次过滤, 重启后直接从库回读) ----
             conn = quant_data.get_db()
             try:
                 bt_rows = conn.execute("""
@@ -2037,24 +2136,28 @@ elif page == "量化分析":
                            avg_trade_ret, avg_stat_ret, avg_gap_cost, avg_fund_util,
                            n_triggers, n_rejected, n_end_dropped, excess_vs_bh,
                            excess_vs_index, run_date
-                    FROM backtest_runs ORDER BY strategy_id, segment, fee""").fetchall()
+                    FROM backtest_runs WHERE run_date=?
+                    ORDER BY strategy_id, segment, fee""", (bt_batch_date,)).fetchall()
                 eq_rows = conn.execute("""
                     SELECT e.run_id, e.trade_date, e.strategy_value
                     FROM backtest_equity e
                     JOIN backtest_runs r ON e.run_id = r.run_id
-                    WHERE r.fee = 0.0""").fetchall()
+                    WHERE r.fee = 0.0 AND r.run_date=?""", (bt_batch_date,)).fetchall()
                 tr_rows = conn.execute("""
-                    SELECT strategy_id, segment, fee, code, market, trigger_date,
-                           entry_date, entry_price, exit_date, exit_price, return_pct,
-                           stat_ret, gap_cost, holding_days
-                    FROM backtest_trades ORDER BY trigger_date, code""").fetchall()
+                    SELECT t.strategy_id, t.segment, t.fee, t.code, t.market, t.trigger_date,
+                           t.entry_date, t.entry_price, t.exit_date, t.exit_price, t.return_pct,
+                           t.stat_ret, t.gap_cost, t.holding_days
+                    FROM backtest_trades t
+                    JOIN backtest_runs r ON t.run_id = r.run_id
+                    WHERE r.run_date=? ORDER BY t.trigger_date, t.code""",
+                    (bt_batch_date,)).fetchall()
+                proto_row = conn.execute(
+                    "SELECT result_json FROM backtest_meta WHERE meta_key='d2_protocol' "
+                    "AND run_date=? ORDER BY id DESC LIMIT 1",
+                    (bt_batch_date,)).fetchone()
             finally:
                 conn.close()
-            try:
-                bt_meta = quant_data.load_backtest_meta()
-            except Exception:
-                bt_meta = {}
-            proto = bt_meta.get('d2_protocol', {}).get('json', {}) if bt_meta else {}
+            proto = json.loads(proto_row['result_json']) if proto_row else {}
 
             # ---- 索引与工具 ----
             def _bt_run(sid, seg, fee=0.0):
@@ -2364,8 +2467,9 @@ elif page == "量化分析":
                 if sid == 'S1e':
                     conclusions.append(
                         f"**观察策略 S1e**(RSI24超卖): oos 超额 "
-                        f"{(r['excess_vs_bh'] or 0) * 100:+.2f}pp — 与模块3全窗口统计(+14.9pp)差距显著, "
-                        f"时间切分验证未通过, 维持「观察(验证中)」身份, 转正由 forward 样本裁决")
+                        f"{(r['excess_vs_bh'] or 0) * 100:+.2f}pp — RSI24 时间分割验证未达转正"
+                        f"(两段超额方向分歧, 见模块3 RSI24 验证面板), 维持「观察(验证中)」身份, "
+                        f"转正由 forward 样本裁决")
                 if sid == 'S2' and r and r['n_triggers'] and r['n_rejected'] / r['n_triggers'] > 0.3:
                     conclusions.append(
                         f"**容量约束**: S2 组合 {r['n_triggers']} 触发中 {r['n_rejected']} 笔被 K=3 满仓拒绝"
@@ -2485,14 +2589,59 @@ elif page == "量化分析":
             } for p in pool])
             st.dataframe(pool_df, use_container_width=True, hide_index=True)
             st.caption("反向口径行: 胜率=看跌正确率, 平均收益=平均跌幅, 盈亏比=平均跌幅/平均反弹幅度 · "
-                       "「观察(验证中)」= RSI24 并行观察信号: 全样本达标但时间切分验证未完成"
-                       "（后30%段仅3个触发），暂不转正")
+                       "「观察(验证中)」= RSI24 并行观察信号: 未通过时间分割预注册规则前不转正 · "
+                       "「有效(时间分割通过)」/「淘汰(时间分割未过)」由模块8预注册规则裁决(见下方)")
+
+            # RSI24 时间分割验证（模块8 预注册规则）
+            v = m3.get("rsi24_verdict") or {}
+            if v.get("signals"):
+                st.write("**RSI24 时间分割验证（模块8 预注册规则，看结果前冻结）**")
+                st.caption(v.get("rule", ""))
+                v_rows = []
+                for sig, e in v["signals"].items():
+                    for seg_label, seg in (("段A 开发70%", e.get("seg_a")),
+                                           ("段B 验证30%", e.get("seg_b"))):
+                        if seg:
+                            v_rows.append({
+                                "信号": sig, "分段": seg_label,
+                                "触发数": seg.get("triggers"),
+                                "胜率%": seg.get("win_rate"),
+                                "基准%": seg.get("baseline_win_rate"),
+                                "超额胜率pp": seg.get("excess_win_rate"),
+                                "平均收益%": seg.get("avg_return"),
+                                "超额收益%": seg.get("excess_return"),
+                            })
+                if v_rows:
+                    st.dataframe(pd.DataFrame(v_rows), use_container_width=True, hide_index=True)
+                verdicts = []
+                for sig, e in v["signals"].items():
+                    icon = {"转正": "🟢", "淘汰": "🔴"}.get(e.get("verdict"), "🟡")
+                    split_d = e.get("split_date") or "—"
+                    verdicts.append(f"{icon} **{sig}**: {e.get('verdict')}（分割点 {split_d}）— "
+                                    f"{e.get('verdict_reason', '')}")
+                st.markdown("  \n".join(verdicts))
+                st.caption("预注册规则一经写入不得依结果修改（与回测冻结协议同源）· "
+                           "转正条件: 两段各≥20触发且超额胜率/超额收益均为正 · "
+                           "淘汰条件: 任一段超额胜率≤-5pp或超额收益≤-3pp")
 
             # 被动信号明细
             st.divider()
             st.write("**被动信号统计明细（按信号类型×方向×持有周期）**")
+            by_cal = m3.get("passive_by_caliber") or {"合并": m3["passive"]}
+            cal_options = [c for c in ("合并", "replay", "live") if c in by_cal and by_cal[c]]
+            cal_names = {"合并": "合并（replay+live，资格判定口径）",
+                         "replay": "仅回放 replay（2021-01 起）",
+                         "live": "仅实采 live（2025-07-29 起）"}
+            passive_sel = m3["passive"]
+            if len(cal_options) > 1:
+                cal_sel = st.radio("统计口径（模块8 双来源分离）", cal_options,
+                                   horizontal=True, format_func=lambda c: cal_names.get(c, c),
+                                   key="m3_caliber")
+                passive_sel = by_cal.get(cal_sel, m3["passive"])
+                st.caption("有效池资格判定以**合并**口径为准（样本最大）；replay/live 口径仅供来源对照，"
+                           "若两口径结论背离，以 live 定观察方向、合并定统计资格")
             sig_rows = []
-            for r in m3["passive"]:
+            for r in passive_sel:
                 for n, st_ in r["stats"].items():
                     sig_rows.append({
                         "信号": f"{r['signal_type']}|{r['signal_subtype']}",
@@ -2521,7 +2670,7 @@ elif page == "量化分析":
                 # 胜率对比图
                 st.write("**各信号胜率 vs 随机基准**")
                 fig_w = go.Figure()
-                for r in m3["passive"]:
+                for r in passive_sel:
                     label = f"{r['signal_type']}|{r['signal_subtype']}|{r['direction']}"
                     periods = sorted(r["stats"].keys())
                     fig_w.add_trace(go.Scatter(
@@ -2553,7 +2702,7 @@ elif page == "量化分析":
                 # 超额收益图
                 st.write("**各信号超额收益（信号平均收益 − 随机基准）**")
                 fig_e = go.Figure()
-                for r in m3["passive"]:
+                for r in passive_sel:
                     label = f"{r['signal_type']}|{r['signal_subtype']}|{r['direction']}"
                     periods = sorted(r["stats"].keys())
                     fig_e.add_trace(go.Bar(

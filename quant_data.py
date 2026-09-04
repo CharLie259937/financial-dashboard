@@ -79,7 +79,8 @@ def init_db():
         threshold REAL,
         threshold_type TEXT,
         description TEXT,
-        trade_date TEXT
+        trade_date TEXT,
+        source TEXT DEFAULT 'live'
     );
     CREATE INDEX IF NOT EXISTS idx_sig_code ON passive_signals(code);
     CREATE INDEX IF NOT EXISTS idx_sig_type ON passive_signals(signal_type);
@@ -171,6 +172,11 @@ def _migrate_db():
     for col, col_type in new_cols.items():
         if col not in cols:
             conn.execute(f"ALTER TABLE daily_quotes ADD COLUMN {col} {col_type}")
+
+    # 模块8: passive_signals 增加 source 列('live'实采 / 'replay'回放), 存量行默认 live
+    sig_cols = [r[1] for r in conn.execute("PRAGMA table_info(passive_signals)").fetchall()]
+    if 'source' not in sig_cols:
+        conn.execute("ALTER TABLE passive_signals ADD COLUMN source TEXT DEFAULT 'live'")
 
     conn.commit()
     conn.close()
@@ -1299,21 +1305,23 @@ def compute_random_baselines(reverse=False):
     return out
 
 
-def compute_passive_signal_stats():
+def compute_passive_signal_stats(source=None):
     """被动埋点统计: 按 信号类型|子类型|方向 分组 × 4持有周期
     附随机基准对比 → 超额胜率/超额收益
     bearish 信号采用反向评估口径: 未来收益取负后统计,
     胜率=看跌正确率(下跌次数/总次数), 平均收益=平均跌幅,
-    对照基准为反向口径随机基准(随机下跌率)"""
+    对照基准为反向口径随机基准(随机下跌率)
+    source: None=合并口径 / 'live'=仅实采 / 'replay'=仅回放 (模块8双口径)"""
     price_map, date_map = _load_price_map()
     baselines = compute_random_baselines()
     rev_baselines = compute_random_baselines(reverse=True)
 
     pool_f, pool_args = _pool_sql_filter(_pool_code_set())
     conn = get_db()
+    src_sql = " AND source=? " if source else " "
     sig_rows = conn.execute(
         "SELECT code, market, trade_date, signal_type, signal_subtype, direction "
-        f"FROM passive_signals WHERE {pool_f}", pool_args
+        f"FROM passive_signals WHERE {pool_f}{src_sql}", pool_args + ([source] if source else [])
     ).fetchall()
     conn.close()
 
@@ -1424,10 +1432,12 @@ def compute_active_event_stats():
 POOL_CRITERIA = {'win_rate': 55.0, 'profit_loss_ratio': 1.2, 'min_triggers': 30}
 
 
-def build_effective_signal_pool(passive_stats):
+def build_effective_signal_pool(passive_stats, rsi24_verdict=None):
     """筛选核心有效信号池:
     胜率>55% 且 盈亏比>1.2 且 触发样本≥30 (任一持有周期达标即入选)
-    小样本(<30)单独标记为'参考'"""
+    小样本(<30)单独标记为'参考'
+    rsi24_verdict: validate_rsi24_timesplit() 结果(模块8预注册规则),
+    转正→'有效(时间分割通过)', 淘汰→'淘汰(时间分割未过)', 其余维持观察"""
     pool = []
     for r in passive_stats:
         best = None
@@ -1455,17 +1465,24 @@ def build_effective_signal_pool(passive_stats):
                 'excess_win_rate': st.get('excess_win_rate'),
                 'excess_return': st.get('excess_return'),
             })
-        # RSI24 为并行观察信号: 时间切分验证未完成(后30%段仅3触发),
-        # 达标也不标记为'有效', 待样本外验证通过后转正
-        if r['signal_type'].startswith('rsi24') and entry['status'] == '有效':
-            entry['status'] = '观察(验证中)'
+        # RSI24 观察信号的状态由预注册时间分割规则裁决(模块8)
+        if r['signal_type'].startswith('rsi24'):
+            v = (rsi24_verdict or {}).get('signals', {}).get(r['signal_type'])
+            if v and v.get('verdict') == '转正' and entry['status'] == '有效':
+                entry['status'] = '有效(时间分割通过)'
+            elif v and v.get('verdict') == '淘汰':
+                entry['status'] = '淘汰(时间分割未过)'
+            elif entry['status'] == '有效':
+                entry['status'] = '观察(验证中)'
         pool.append(entry)
-    pool.sort(key=lambda x: (x['status'] != '有效', -x.get('total_signals', 0)))
+    pool.sort(key=lambda x: (x['status'] != '有效' and x['status'] != '有效(时间分割通过)',
+                             -x.get('total_signals', 0)))
     return pool
 
 
-def save_signal_effect_report(passive_stats, event_stats, pool):
-    """《埋点信号效果总表》→ signal_effect_report 表"""
+def save_signal_effect_report(passive_by_caliber, event_stats, pool):
+    """《埋点信号效果总表》→ signal_effect_report 表
+    模块8: 被动信号按三口径入库({'合并'/'replay'/'live': stats}), 主动事件仅'合并'口径"""
     conn = get_db()
     conn.execute("DROP TABLE IF EXISTS signal_effect_report")
     conn.execute("""
@@ -1473,6 +1490,7 @@ def save_signal_effect_report(passive_stats, event_stats, pool):
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             category TEXT NOT NULL,
             group_key TEXT NOT NULL,
+            caliber TEXT DEFAULT '合并',
             direction TEXT,
             eval_mode TEXT,
             total_count INTEGER,
@@ -1495,30 +1513,35 @@ def save_signal_effect_report(passive_stats, event_stats, pool):
     """)
     now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
-    for r in passive_stats:
-        gk = f"{r['signal_type']}|{r['signal_subtype']}"
-        status = '参考(小样本)' if r['total_signals'] < POOL_CRITERIA['min_triggers'] else ''
-        pool_st = next((p for p in pool if p['signal_type'] == r['signal_type']
-                        and p['signal_subtype'] == r['signal_subtype']
-                        and p['direction'] == r['direction']), {})
-        for n, st in r['stats'].items():
-            conn.execute(
-                "INSERT INTO signal_effect_report "
-                "(category, group_key, direction, eval_mode, total_count, hold_days, triggers, "
-                "win_rate, baseline_win_rate, excess_win_rate, avg_return, "
-                "baseline_return, excess_return, avg_win, avg_loss, "
-                "profit_loss_ratio, max_win, max_loss, status, generated_at) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                ('passive', gk, r['direction'], st.get('eval_mode', 'normal'),
-                 r['total_signals'], n,
-                 st['triggers'], st['win_rate'], st.get('baseline_win_rate'),
-                 st.get('excess_win_rate'), st['avg_return'],
-                 st.get('baseline_return'), st.get('excess_return'),
-                 st['avg_win'], st['avg_loss'], st['profit_loss_ratio'],
-                 st['max_win'], st['max_loss'],
-                 pool_st.get('status', status) if pool_st.get('status') != '参考(小样本)' else '参考(小样本)',
-                 now)
-            )
+    for caliber, passive_stats in passive_by_caliber.items():
+        for r in passive_stats:
+            gk = f"{r['signal_type']}|{r['signal_subtype']}"
+            status = ('参考(小样本)'
+                      if r['total_signals'] < POOL_CRITERIA['min_triggers'] else '')
+            pool_st = next((p for p in pool if p['signal_type'] == r['signal_type']
+                            and p['signal_subtype'] == r['signal_subtype']
+                            and p['direction'] == r['direction']), {})
+            # 分口径行的状态沿用合并口径池的判定, 但'有效'级降为'对照'——
+            # 资格判定只以合并口径为准, 分口径行仅供来源对照
+            cal_status = pool_st.get('status', status)
+            if caliber != '合并' and cal_status in ('有效', '有效(时间分割通过)'):
+                cal_status = '对照(合并口径有效)'
+            for n, st in r['stats'].items():
+                conn.execute(
+                    "INSERT INTO signal_effect_report "
+                    "(category, group_key, caliber, direction, eval_mode, total_count, "
+                    "hold_days, triggers, win_rate, baseline_win_rate, excess_win_rate, "
+                    "avg_return, baseline_return, excess_return, avg_win, avg_loss, "
+                    "profit_loss_ratio, max_win, max_loss, status, generated_at) "
+                    "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    ('passive', gk, caliber, r['direction'], st.get('eval_mode', 'normal'),
+                     r['total_signals'], n,
+                     st['triggers'], st['win_rate'], st.get('baseline_win_rate'),
+                     st.get('excess_win_rate'), st['avg_return'],
+                     st.get('baseline_return'), st.get('excess_return'),
+                     st['avg_win'], st['avg_loss'], st['profit_loss_ratio'],
+                     st['max_win'], st['max_loss'], cal_status, now)
+                )
 
     for r in event_stats['by_dimension']:
         gk = '|'.join(str(k) for k in r['key'])
@@ -1538,12 +1561,12 @@ def save_signal_effect_report(passive_stats, event_stats, pool):
         for n, st in r['stats'].items():
             conn.execute(
                 "INSERT INTO signal_effect_report "
-                "(category, group_key, direction, eval_mode, total_count, hold_days, triggers, "
-                "win_rate, baseline_win_rate, excess_win_rate, avg_return, "
-                "baseline_return, excess_return, avg_win, avg_loss, "
+                "(category, group_key, caliber, direction, eval_mode, total_count, "
+                "hold_days, triggers, win_rate, baseline_win_rate, excess_win_rate, "
+                "avg_return, baseline_return, excess_return, avg_win, avg_loss, "
                 "profit_loss_ratio, max_win, max_loss, status, generated_at) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                ('active', gk, r['key'][1], st.get('eval_mode', 'normal'),
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                ('active', gk, '合并', r['key'][1], st.get('eval_mode', 'normal'),
                  r['total_events'], n,
                  st['triggers'], st['win_rate'], st.get('baseline_win_rate'),
                  st.get('excess_win_rate'), st['avg_return'],
@@ -1557,17 +1580,24 @@ def save_signal_effect_report(passive_stats, event_stats, pool):
 
 
 def run_module3_analysis():
-    """模块3完整执行入口: 被动统计+主动统计+有效池+入库"""
-    passive_stats, baselines = compute_passive_signal_stats()
+    """模块3完整执行入口: 被动统计(三口径)+主动统计+有效池+RSI24时间分割+入库"""
+    passive_by_cal = {}
+    baselines = None
+    for cal, src in [('合并', None), ('replay', 'replay'), ('live', 'live')]:
+        stats, baselines = compute_passive_signal_stats(source=src)
+        passive_by_cal[cal] = stats
     event_stats = compute_active_event_stats()
-    pool = build_effective_signal_pool(passive_stats)
-    save_signal_effect_report(passive_stats, event_stats, pool)
+    rsi24_verdict = validate_rsi24_timesplit()
+    pool = build_effective_signal_pool(passive_by_cal['合并'], rsi24_verdict)
+    save_signal_effect_report(passive_by_cal, event_stats, pool)
     return {
-        'passive': passive_stats,
+        'passive': passive_by_cal['合并'],
+        'passive_by_caliber': passive_by_cal,
         'events': event_stats,
         'pool': pool,
         'baselines': baselines,
         'rev_baselines': compute_random_baselines(reverse=True),
+        'rsi24_verdict': rsi24_verdict,
     }
 
 
@@ -1813,7 +1843,7 @@ def calc_all_indicators(df):
 # 被动信号检测
 # ============================================================
 
-def detect_signals(df, code, market, name=""):
+def detect_signals(df, code, market, name="", source="live"):
     signals = []
     if len(df) < 30:
         return signals
@@ -1972,13 +2002,13 @@ def detect_signals(df, code, market, name=""):
                 "INSERT INTO passive_signals "
                 "(code, market, name, trigger_time, signal_type, signal_subtype, direction, "
                 "price, volume, indicator_value, indicator_name, threshold, threshold_type, "
-                "description, trade_date) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "description, trade_date, source) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (code, market, name,
                  sig.get('trade_date', '') + ' 15:00:00',
                  sig['signal_type'], sig['signal_subtype'], sig['direction'],
                  sig['price'], 0, sig['indicator_value'], sig['indicator_name'],
                  sig['threshold'], sig['threshold_type'],
-                 sig['description'], sig['trade_date'])
+                 sig['description'], sig['trade_date'], source)
             )
         conn.commit()
         conn.close()
@@ -3395,12 +3425,12 @@ def _filter_bt_data(data, start_date):
 
 
 def create_backtest_tables(conn):
-    """建4张回测表(整批重建, 模块4同款模式)
-    forward run 属追加式入库, 由独立入口写入, 不触发表重建"""
-    for t in ['backtest_runs', 'backtest_equity', 'backtest_trades', 'backtest_meta']:
-        conn.execute(f"DROP TABLE IF EXISTS {t}")
+    """建4张回测表(2026-09-04 模块8起改为多批次追加模式: 已存在则跳过, 不再DROP整批重建)
+    旧行为(整批DROP重建)与 run_d2_backtests 的同日幂等/跨日保留逻辑矛盾——
+    每次重跑都会清掉全部历史批次, 冻结批次 2026-09-03 因此丢失过一次(从备份恢复)
+    forward run 属追加式入库, 由独立入口写入, 不触碰本组表"""
     conn.execute("""
-        CREATE TABLE backtest_runs(
+        CREATE TABLE IF NOT EXISTS backtest_runs(
             run_id INTEGER PRIMARY KEY AUTOINCREMENT,
             strategy_id TEXT NOT NULL,
             strategy_name TEXT,
@@ -3419,13 +3449,13 @@ def create_backtest_tables(conn):
             run_date TEXT, generated_at TEXT
         )""")
     conn.execute("""
-        CREATE TABLE backtest_equity(
+        CREATE TABLE IF NOT EXISTS backtest_equity(
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             run_id INTEGER, trade_date TEXT,
             strategy_value REAL, bh_value REAL, index_value REAL
         )""")
     conn.execute("""
-        CREATE TABLE backtest_trades(
+        CREATE TABLE IF NOT EXISTS backtest_trades(
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             run_id INTEGER, strategy_id TEXT, segment TEXT, fee REAL,
             code TEXT, market TEXT,
@@ -3435,7 +3465,7 @@ def create_backtest_tables(conn):
             holding_days INTEGER, generated_at TEXT
         )""")
     conn.execute("""
-        CREATE TABLE backtest_meta(
+        CREATE TABLE IF NOT EXISTS backtest_meta(
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             meta_key TEXT,
             result_json TEXT,
@@ -3476,6 +3506,16 @@ def run_d2_backtests():
     create_backtest_tables(conn)
     now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     run_date = datetime.now().strftime('%Y-%m-%d')
+    # 同日批次幂等: 批次由 run_date 标识, 同日重跑先清旧批再入库;
+    # 跨日批次保留作对照(模块8扩窗批次 vs 2026-09-03 冻结批次)
+    old_ids = [r[0] for r in conn.execute(
+        "SELECT run_id FROM backtest_runs WHERE run_date=?", (run_date,)).fetchall()]
+    if old_ids:
+        marks = ",".join("?" * len(old_ids))
+        conn.execute(f"DELETE FROM backtest_equity WHERE run_id IN ({marks})", old_ids)
+        conn.execute(f"DELETE FROM backtest_trades WHERE run_id IN ({marks})", old_ids)
+        conn.execute("DELETE FROM backtest_runs WHERE run_date=?", (run_date,))
+        conn.execute("DELETE FROM backtest_meta WHERE run_date=?", (run_date,))
     summary = {'runs': 0, 'equity_rows': 0, 'trade_rows': 0, 'segments': {}}
 
     def insert_run(kind, sid, name, seg, fee, res, cal, bh_eq, idx_eq,
@@ -3983,3 +4023,217 @@ def get_forward_view():
     conn.close()
     return {'equity': equity, 'trades': trades, 'status': _forward_status(),
             'protocol': json.loads(protocol_row[0]) if protocol_row else None}
+
+
+# ============================================================
+# 模块 8: 样本扩展与信号回放 (2026-09-04)
+# 行情回填至 2020(指标预热) → 信号回放自 2021(source='replay') →
+# 模块3三口径统计 + RSI24时间分割验证 → 模块5冻结参数扩窗重跑(仅记录)
+# 详见《模块8开发计划.md》; 冻结协议: 数据扩展允许, 参数/池/策略变更禁止
+# ============================================================
+
+QUOTE_BACKFILL_START = '2020-01-01'   # 行情回填起点(多回1年做指标预热)
+REPLAY_START = '2021-01-01'          # 回放信号记录起点
+MACRO_BACKFILL_TARGET = '2023-01-01' # 宏观回填目标(源深度限制, 2022-12前无数据)
+M8_SIGNAL_SPLIT = 0.7                # RSI24时间分割: 前70%开发段/后30%验证段
+
+
+def backfill_quotes_full(log=print):
+    """模块8 行情回填: 池内股票回填至 QUOTE_BACKFILL_START
+    复用现有采集函数(akshare 全历史 + qfq), INSERT OR REPLACE 全序列统一复权基准
+    注意: 历史价格按最新前复权基准重写(分红导致的基准移动, 全序列口径统一)"""
+    days = ((datetime.now() - datetime.strptime(QUOTE_BACKFILL_START, '%Y-%m-%d')).days + 5)
+    stocks = get_stock_pool(active_only=True)
+    out = []
+    for s in stocks:
+        code, market = s['code'], s.get('market', 'A股')
+        try:
+            if market == 'A股':
+                n = collect_a_share_daily(code, days)
+            elif market == '港股':
+                n = collect_hk_daily(code, days)
+            else:
+                n = collect_us_daily(code, days)
+        except Exception as e:
+            print(f"[backfill_quotes_full] {code}: {type(e).__name__}: {e}")
+            n = 0
+        log(f"  [backfill] {code} {market}: {n} 行")
+        out.append({'code': code, 'market': market, 'rows': n})
+    return out
+
+
+def replay_passive_signals(log=print):
+    """模块8 信号回放: 在回填行情上全历史确定性重放 14 条被动规则
+    - 指标在完整序列上重算(2020起, 保证2021信号的滚动窗口预热)
+    - 只记录 trade_date >= REPLAY_START 的信号, source='replay'
+    - 幂等: 复用既有业务键(code+date+type+subtype+direction), 已存在(live或replay)则跳过
+      → 实采段(>=2025-07-29)既有 live 行不重不覆, 仅补缺口并如实标 replay
+    - 重复运行零新增"""
+    conn = get_db()
+    before = conn.execute(
+        "SELECT COUNT(*) FROM passive_signals WHERE source='replay'").fetchone()[0]
+    conn.close()
+    stocks = get_stock_pool(active_only=True)
+    per_stock = []
+    for s in stocks:
+        code, market, name = s['code'], s.get('market', 'A股'), s.get('name', '')
+        df = get_daily_quotes(code, days=4000)
+        if df is None or len(df) < 30:
+            per_stock.append({'code': code, 'detected': 0})
+            continue
+        df = calc_all_indicators(df)          # 完整序列重算指标(预热)
+        df = df[df['date'] >= pd.Timestamp(REPLAY_START)].reset_index(drop=True)
+        sigs = detect_signals(df, code, market, name, source='replay')
+        per_stock.append({'code': code, 'detected': len(sigs)})
+        log(f"  [replay] {code}: 检出 {len(sigs)} 条(REPLAY_START={REPLAY_START} 起)")
+    conn = get_db()
+    after = conn.execute(
+        "SELECT COUNT(*) FROM passive_signals WHERE source='replay'").fetchone()[0]
+    conn.close()
+    log(f"  [replay] 新增入库 {after - before} 条 (replay 总数 {after})")
+    return {'per_stock': per_stock, 'new_inserted': after - before, 'total_replay': after}
+
+
+def validate_rsi24_timesplit(split=M8_SIGNAL_SPLIT, hold=10):
+    """RSI24 时间分割验证(模块8 预注册规则, 2026-09-04 看结果前冻结):
+    - 对象: rsi24_oversold(bullish/normal) 与 rsi24_overbought(bearish/reverse), 合并口径
+    - 分割: 信号按 trade_date 升序, 前70%段A(开发) / 后30%段B(验证)
+    - 转正: 两段各自触发数>=20 且 两段超额胜率>0 且 两段平均超额收益>0
+    - 淘汰: 两段触发均>=20的前提下, 任一段超额胜率<=-5pp 或 平均超额收益<=-3pp
+    - 任一段触发<20 → 继续观察(样本不足); 其余 → 继续观察
+    规则一经写入不得依结果修改(与回测冻结协议同源)"""
+    rule_text = (f"预注册(2026-09-04): 按{int(split*100)}%/{int((1-split)*100)}%分割, "
+                 f"{hold}日持有期; 转正=两段触发>=20且超额胜率/超额收益均>0; "
+                 f"淘汰=任一段超额胜率<=-5pp或超额收益<=-3pp(两段触发均>=20); 其余继续观察")
+    price_map, date_map = _load_price_map()
+    baselines = compute_random_baselines()
+    rev_baselines = compute_random_baselines(reverse=True)
+
+    pool_f, pool_args = _pool_sql_filter(_pool_code_set())
+    conn = get_db()
+    targets = {
+        'rsi24_oversold': ('bullish', False),
+        'rsi24_overbought': ('bearish', True),
+    }
+    result = {'rule': rule_text, 'split_ratio': split, 'hold_days': hold,
+              'generated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+              'signals': {}}
+    for sig_type, (direction, reverse) in targets.items():
+        rows = conn.execute(
+            f"SELECT code, trade_date FROM passive_signals "
+            f"WHERE signal_type=? AND direction='bullish' AND {pool_f}"
+            if sig_type == 'rsi24_oversold' else
+            f"SELECT code, trade_date FROM passive_signals "
+            f"WHERE signal_type=? AND direction='bearish' AND {pool_f}",
+            (sig_type,) + tuple(pool_args)
+        ).fetchall()
+        rows = sorted(rows, key=lambda r: r['trade_date'])
+        n_total = len(rows)
+        entry = {'direction': direction,
+                 'eval_mode': 'reverse' if reverse else 'normal',
+                 'n_total': n_total, 'split_date': None,
+                 'seg_a': None, 'seg_b': None,
+                 'verdict': '继续观察', 'verdict_reason': ''}
+        if n_total >= 4:
+            cut = int(n_total * split)
+            seg_a, seg_b = rows[:cut], rows[cut:]
+            entry['split_date'] = seg_b[0]['trade_date'] if seg_b else None
+
+            def _seg_stats(segs):
+                rets = [_future_return(price_map, date_map, r['code'], r['trade_date'], hold)
+                        for r in segs]
+                if reverse:
+                    rets = [-r if r is not None else None for r in rets]
+                st = _win_stats(rets) or {}
+                base = (rev_baselines if reverse else baselines).get(hold) or {}
+                out = {'n': len(segs), 'triggers': st.get('triggers', 0),
+                       'win_rate': st.get('win_rate'),
+                       'avg_return': st.get('avg_return')}
+                if base and st:
+                    out['baseline_win_rate'] = base.get('win_rate')
+                    out['baseline_return'] = base.get('avg_return')
+                    out['excess_win_rate'] = (round(st['win_rate'] - base['win_rate'], 2)
+                                              if st.get('win_rate') is not None else None)
+                    out['excess_return'] = (round(st['avg_return'] - base['avg_return'], 4)
+                                            if st.get('avg_return') is not None else None)
+                return out
+
+            entry['seg_a'] = _seg_stats(seg_a)
+            entry['seg_b'] = _seg_stats(seg_b)
+            a, b = entry['seg_a'], entry['seg_b']
+            enough = (a['triggers'] >= 20 and b['triggers'] >= 20)
+            if not enough:
+                entry['verdict'] = '继续观察'
+                entry['verdict_reason'] = (f"样本不足: 段A {a['triggers']} / 段B {b['triggers']} 触发"
+                                           " (转正与淘汰均要求两段各>=20)")
+            else:
+                pos = all(x['excess_win_rate'] is not None and x['excess_win_rate'] > 0
+                          and x['excess_return'] is not None and x['excess_return'] > 0
+                          for x in (a, b))
+                kill = any(x['excess_win_rate'] is not None and x['excess_win_rate'] <= -5
+                           or x['excess_return'] is not None and x['excess_return'] <= -3
+                           for x in (a, b))
+                if pos:
+                    entry['verdict'] = '转正'
+                    entry['verdict_reason'] = "两段超额胜率与超额收益均为正"
+                elif kill:
+                    entry['verdict'] = '淘汰'
+                    entry['verdict_reason'] = "任一段超额胜率<=-5pp或超额收益<=-3pp"
+                else:
+                    entry['verdict'] = '继续观察'
+                    entry['verdict_reason'] = "未达转正也未触发淘汰阈值"
+        else:
+            entry['verdict_reason'] = f"总样本不足({n_total}<4), 无法分割"
+        result['signals'][sig_type] = entry
+    conn.close()
+    return result
+
+
+def get_backfill_status():
+    """模块8 回填状态: 行情/信号(按source)/宽表/指标/宏观覆盖"""
+    conn = get_db()
+    pool_f, pool_args = _pool_sql_filter(_pool_code_set())
+    stocks = [dict(r) for r in conn.execute(
+        f"SELECT code, market, COUNT(*) n, MIN(trade_date) s, MAX(trade_date) e "
+        f"FROM daily_quotes WHERE {pool_f} GROUP BY code, market", pool_args)]
+    src = [dict(r) for r in conn.execute(
+        f"SELECT COALESCE(source,'live') source, COUNT(*) n, MIN(trade_date) s, "
+        f"MAX(trade_date) e FROM passive_signals WHERE {pool_f} GROUP BY 1", pool_args)]
+    wide = conn.execute(
+        f"SELECT COUNT(*), MIN(trade_date), MAX(trade_date) FROM daily_feature_base "
+        f"WHERE {pool_f}", pool_args).fetchone()
+    ind = conn.execute(
+        f"SELECT COUNT(*), MIN(trade_date), MAX(trade_date) FROM daily_indicators "
+        f"WHERE {pool_f}", pool_args).fetchone()
+    macro = conn.execute("SELECT COUNT(*), MIN(trade_date), MAX(trade_date), "
+                         "COUNT(DISTINCT trade_date) FROM macro_events").fetchone()
+    conn.close()
+    return {
+        'quote_backfill_start': QUOTE_BACKFILL_START,
+        'replay_start': REPLAY_START,
+        'macro_target': MACRO_BACKFILL_TARGET,
+        'stocks': stocks, 'signal_sources': src,
+        'wide': {'rows': wide[0], 'start': wide[1], 'end': wide[2]},
+        'indicators': {'rows': ind[0], 'start': ind[1], 'end': ind[2]},
+        'macro': {'rows': macro[0], 'start': macro[1], 'end': macro[2],
+                  'days': macro[3]},
+    }
+
+
+def run_m8_backfill_chain(log=print):
+    """模块8 一键回填重算链: 行情回填→指标全量重算→信号回放→宽表重建
+    (模块3/模块5重算单独触发; 宏观回填为独立后台任务, 见 MACRO_BACKFILL_TARGET)"""
+    log("[m8] ① 行情回填...")
+    quotes = backfill_quotes_full(log=log)
+    log("[m8] ② 指标全量重算...")
+    inds = batch_generate_indicators()
+    for r in inds:
+        log(f"  [m8] 指标 {r['code']}: {r['rows']} 行")
+    log("[m8] ③ 信号回放...")
+    replay = replay_passive_signals(log=log)
+    log("[m8] ④ 宽表全窗口重建...")
+    wide = batch_generate_wide_tables(days=3000)
+    for r in wide:
+        log(f"  [m8] 宽表 {r['code']}: {r['rows']} 行")
+    log("[m8] 链完成 (模块3三口径重算请单独运行 run_module3_analysis)")
+    return {'quotes': quotes, 'indicators': inds, 'replay': replay, 'wide': wide}

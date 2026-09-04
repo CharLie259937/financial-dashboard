@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
 """D3 验证: 模拟 Tab 8 数据层与图表构建(不依赖 Streamlit 运行时)
 对 Desktop 库执行 Tab 8 同款查询 + 净值/回撤/费率图数据构建 + 结论计算
-期望值基准: 2026-09-03 股票池 5→3(00700/300750/AAPL)后的重算结果"""
+期望值基准: 2026-09-04 模块8扩窗批次(最新批次, 2018-06-18起) + 多批次并存模式"""
 import sys
+import json
 import sqlite3
 import pandas as pd
 import plotly.graph_objects as go
@@ -25,6 +26,10 @@ def check(name, cond, detail=""):
 
 
 conn = quant_data.get_db()
+# 模块8 多批次模式: 取最新批次(与看板默认视图一致), 跨日批次保留作对照
+bt_batch = conn.execute("SELECT MAX(run_date) FROM backtest_runs").fetchone()[0]
+n_batches = conn.execute(
+    "SELECT COUNT(DISTINCT run_date) FROM backtest_runs").fetchone()[0]
 bt_rows = conn.execute("""
     SELECT run_id, strategy_id, strategy_name, kind, segment, fee,
            start_date, end_date, n_days, total_return, annual_return,
@@ -33,29 +38,37 @@ bt_rows = conn.execute("""
            avg_trade_ret, avg_stat_ret, avg_gap_cost, avg_fund_util,
            n_triggers, n_rejected, n_end_dropped, excess_vs_bh,
            excess_vs_index, run_date
-    FROM backtest_runs ORDER BY strategy_id, segment, fee""").fetchall()
+    FROM backtest_runs WHERE run_date=?
+    ORDER BY strategy_id, segment, fee""", (bt_batch,)).fetchall()
 eq_rows = conn.execute("""
     SELECT e.run_id, e.trade_date, e.strategy_value
     FROM backtest_equity e JOIN backtest_runs r ON e.run_id = r.run_id
-    WHERE r.fee = 0.0""").fetchall()
+    WHERE r.fee = 0.0 AND r.run_date=?""", (bt_batch,)).fetchall()
 tr_rows = conn.execute("""
-    SELECT strategy_id, segment, fee, code, market, trigger_date,
-           entry_date, entry_price, exit_date, exit_price, return_pct,
-           stat_ret, gap_cost, holding_days
-    FROM backtest_trades ORDER BY trigger_date, code""").fetchall()
+    SELECT t.strategy_id, t.segment, t.fee, t.code, t.market, t.trigger_date,
+           t.entry_date, t.entry_price, t.exit_date, t.exit_price, t.return_pct,
+           t.stat_ret, t.gap_cost, t.holding_days
+    FROM backtest_trades t JOIN backtest_runs r ON t.run_id = r.run_id
+    WHERE r.run_date=? ORDER BY t.trigger_date, t.code""", (bt_batch,)).fetchall()
+proto_row = conn.execute(
+    "SELECT result_json FROM backtest_meta WHERE meta_key='d2_protocol' "
+    "AND run_date=? ORDER BY id DESC LIMIT 1", (bt_batch,)).fetchone()
 conn.close()
-bt_meta = quant_data.load_backtest_meta()
-proto = bt_meta.get('d2_protocol', {}).get('json', {})
+proto = json.loads(proto_row[0]) if proto_row else {}
 
 print("[1] 数据装载")
 n_strat = len(quant_data.BT_STRATEGIES)
 exp_runs = n_strat * len(quant_data.BT_FEE_SENSITIVITY) * 2 + 4
 check(f"runs {exp_runs} 行 (实际 {len(bt_rows)})", len(bt_rows) == exp_runs)
+check(f"多批次并存 {n_batches} 个 (最新 {bt_batch}, 模块8跨日保留)",
+      n_batches >= 2 or len(bt_rows) == exp_runs)
 days = {r['segment']: r['n_days'] for r in bt_rows
         if r['strategy_id'] == 'B1' and r['fee'] == 0.0}
 exp_eq = (n_strat + 2) * sum(days.values())
 check(f"净值 fee0 行数 {exp_eq} (实际 {len(eq_rows)})", len(eq_rows) == exp_eq)
-check(f"交易明细 849 行 (实际 {len(tr_rows)})", len(tr_rows) == 849)
+exp_tr = sum(r['n_trades'] or 0 for r in bt_rows)
+check(f"交易明细 {exp_tr} 行 (与 runs 汇总一致, 实际 {len(tr_rows)})",
+      len(tr_rows) == exp_tr)
 check("meta 含 d2_protocol", bool(proto))
 n_s3 = sum(1 for r in bt_rows if r['strategy_id'] == 'S3')
 check("S3 已清除(2026-09-02删除, 触发源财报数据不合格)", n_s3 == 0)
@@ -92,7 +105,8 @@ check(f"fee0 run 索引 {n_strat + 2} 组({n_strat}策略+双基准)×2段",
       len(run_meta) == (n_strat + 2) * 2, f"实际 {len(run_meta)}")
 
 print("[3] 净值/回撤曲线构建 (两段)")
-for seg, expect_days in [('oos', 83), ('full', 264)]:
+for seg in ['oos', 'full']:
+    expect_days = days[seg]
     for sid in bt_strats + ['B1', 'B2']:
         xs, ys = _bt_curve(sid, seg)
         if not check(f"{seg} {sid} 曲线 {expect_days} 点 (实际 {len(xs)})", len(xs) == expect_days):
@@ -145,8 +159,8 @@ check("数值列 dtype 均为数值型 int64/float64 (无 object 混型, Arrow �
           for c in cmp_df.columns if c != '对象'))
 s1a = cmp_df[cmp_df['对象'].str.startswith('S1a')].iloc[0]
 check(f"S1a OOS收益 10.23 (实际 {s1a['OOS收益%']})", abs(s1a['OOS收益%'] - 10.23) < 0.01)
-check(f"S1a OOS超额vsB1 11.84pp (实际 {s1a['OOS超额vsB1(pp)']})",
-      abs(s1a['OOS超额vsB1(pp)'] - 11.84) < 0.01)
+check(f"S1a OOS超额vsB1 13.51pp (实际 {s1a['OOS超额vsB1(pp)']})",
+      abs(s1a['OOS超额vsB1(pp)'] - 13.51) < 0.01)
 
 print("[6] 费率敏感性图构建")
 fig_fee = make_subplots(rows=1, cols=2, subplot_titles=("full 段", "oos 段"))
@@ -172,7 +186,9 @@ check(f"S1a oos fee0.3% = +9.05% (实际 {oos_s1a_fee3*100:.2f}%)",
 print("[7] 交易明细过滤(oos×fee0×S1a)")
 trs = [t for t in tr_rows if t['strategy_id'] == 'S1a' and t['segment'] == 'oos'
        and abs(t['fee'] - 0.0) < 1e-9]
-check(f"S1a oos fee0 交易 5 笔 (实际 {len(trs)})", len(trs) == 5)
+exp_s1a_tr = _bt_run('S1a', 'oos')['n_trades']
+check(f"S1a oos fee0 交易 {exp_s1a_tr} 笔 (与runs汇总一致, 实际 {len(trs)})",
+      len(trs) == exp_s1a_tr)
 tr_df = pd.DataFrame([{
     '代码': t['code'], '市场': t['market'],
     '触发日': t['trigger_date'], '买入日': t['entry_date'],
@@ -183,7 +199,8 @@ tr_df = pd.DataFrame([{
 } for t in trs])
 for c in ['买入价', '卖出价', '收益%', '统计口径%', '跳空成本pp', '持有天数']:
     tr_df[c] = pd.to_numeric(tr_df[c], errors='coerce')
-check(f"交易表 5 行 × 11 列 (实际 {tr_df.shape})", tr_df.shape == (5, 11))
+check(f"交易表 {exp_s1a_tr} 行 × 11 列 (实际 {tr_df.shape})",
+      tr_df.shape == (exp_s1a_tr, 11))
 check(f"均收益可算 ({tr_df['收益%'].mean():.2f}%)", not pd.isna(tr_df['收益%'].mean()))
 
 print("[8] 自动结论逻辑(看板同款)")
@@ -191,7 +208,7 @@ conclusions = []
 oos_strats = [(_bt_run(sid, 'oos'), sid) for sid in bt_strats]
 oos_valid = [(r, sid) for r, sid in oos_strats if r and r['excess_vs_bh'] is not None]
 best_r, best_sid = max(oos_valid, key=lambda x: x[0]['excess_vs_bh'])
-check(f"样本外最强 = S2 (实际 {best_sid})", best_sid == 'S2')
+check(f"样本外最强 = S1a (扩窗后反超S2, 实际 {best_sid})", best_sid == 'S1a')
 oos_fee3 = [(_bt_run(sid, 'oos', 0.003), sid) for sid in bt_strats]
 fee_fragile = [sid for r, sid in oos_fee3
                if r and r['total_return'] is not None and r['total_return'] <= 0]
