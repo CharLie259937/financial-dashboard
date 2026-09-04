@@ -1,0 +1,35 @@
+# Whitelist mode: ignore everything except core deliverables listed below.
+# Data files (.db backups), one-off probe scripts and personal notes stay local.
+*
+!*/
+
+# --- core code ---
+!dashboard.py
+!quant_data.py
+!tracker.py
+!daily_pipeline.py
+
+# --- entry scripts ---
+!run_daily_pipeline.bat
+!register_daily_task.bat
+!启动看板.bat
+
+# --- config ---
+!requirements.txt
+!README.md
+!.gitignore
+!.streamlit/config.toml
+
+# --- module tests ---
+!test_module3.py
+!test_module5.py
+!test_module6.py
+!test_module7.py
+!test_d3_tab.py
+
+# --- docs ---
+!模块5开发计划.md
+!模块6开发计划.md
+!模块7开发计划.md
+!模块逻辑关系总览.md
+!经济日历数据源审计.md
