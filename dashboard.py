@@ -1857,10 +1857,11 @@ elif page == "量化分析":
 
     # --- Tab 8: 宏观日历 (模块6: 先于策略回测 Tab 7 渲染, 规避其条件分支风险) ---
     with quant_tab8:
-        st.subheader("宏观经济日历与事件研究 (模块6)")
+        st.subheader("宏观经济日历与事件研究 (模块6 + 模块9 FDR/Overlay)")
         st.caption("数据源: 百度股市通 sapi (自写客户端带浏览器指纹, 审计 2026-09-02) · 事件时刻为北京时间 · "
                    "研究口径: 常数均值模型 AR (标的=指数自身估计窗均值), 事件窗[-5,+10], 估计窗[-120,-10] min60, "
-                   "t 检验/_agg_group 共享统计核心 · 分组: 家族×地区×指数×意外方向(公布vs预期)")
+                   "t 检验/_agg_group 共享统计核心 · 分组: 家族×地区×指数×意外方向(公布vs预期) · "
+                   "模块9: ⑥⑦ 节 FDR 校正裁决(BH q=0.05 按窗口分层) + 宏观 Overlay 封锁配置(已冻结)")
 
         # --- ① 采集管理 ---
         mst = quant_data.get_macro_status()
@@ -2068,6 +2069,80 @@ elif page == "量化分析":
                         show_ev['纳入'] = show_ev['纳入'].map({1: '✓', 0: '✗'})
                         st.dataframe(show_ev, use_container_width=True, hide_index=True)
 
+                # --- ⑦ FDR 多重检验校正与宏观 Overlay (模块9) ---
+                st.write("**⑦ FDR 多重检验校正与宏观 Overlay (模块9)**")
+                try:
+                    fv = quant_data.load_fdr_view()
+                except Exception as e:
+                    fv = None
+                    st.error(f"FDR 面板读取失败: {e}")
+                if fv is not None:
+                    if fv['results'].empty:
+                        st.info("FDR 裁决尚未运行(run_macro_fdr): 1602 组名义显著含大量假阳性"
+                                "(预期~80组), 未裁决前不得引用任何\"显著\"组; overlay 家族未选出")
+                    else:
+                        fm, om = fv['fdr_meta'], fv['overlay_meta']
+                        lr = fm.get('last_run', {})
+                        fc1, fc2, fc3, fc4 = st.columns(4)
+                        fc1.metric("检验组数(6窗口族)", f"{lr.get('n_rows', 0):,}")
+                        fc2.metric("BH 存活行", lr.get('n_survive_rows', 0))
+                        fc3.metric("Overlay 入选组", lr.get('n_eligible_groups', 0))
+                        fc4.metric("裁决时间", str(lr.get('run_ts', '—'))[:16])
+                        cfg = om.get('config', {})
+                        if cfg.get('groups'):
+                            st.markdown(f"**入选家族** (四条件: BH存活 · n≥{cfg.get('min_n', 30)} · "
+                                        f"CAR<0 只减不加 · 窗口[0,+N]; 护栏: 覆盖率≤{cfg.get('max_cov', 0.5):.0%})")
+                            el_df = pd.DataFrame([{
+                                '地区': g['region'], '事件家族': g['family'],
+                                '指数': g['index_code'], '意外方向': g['direction'],
+                                '封锁窗口N': g['window_days'], '样本n': g['n'],
+                                'CAR均值%': round(g['car_mean'], 2), 't值': round(g['t_stat'], 2),
+                                'p值': round(g['p_value'], 4), 'q值(BH)': round(g['q_value'], 4),
+                                '封锁日覆盖率': f"{max(g['coverage'].values()):.1%}" if g.get('coverage') else '—',
+                            } for g in cfg['groups']])
+                            st.dataframe(el_df, use_container_width=True, hide_index=True)
+                        strata = lr.get('strata', {})
+                        if strata:
+                            st.caption("分层 BH(q=0.05, 每窗口独立检验族): " + " · ".join(
+                                f"{w} m={s['m']}/存活{s['n_survive']}/资格{s['n_eligible']}"
+                                for w, s in sorted(strata.items())))
+                        dg = fm.get('diagnostic_cutoff', {})
+                        if dg:
+                            if dg.get('zero_survival_warning'):
+                                st.error("⚠️ 选择泄漏脆弱性: 主清单在知识截止前子样本中零存活 — "
+                                         "overlay 入选可能完全是截止后数据的产物, 前向裁决前不具任何证据力")
+                            else:
+                                st.caption(f"诊断对照(知识截止 {dg.get('cutoff')} 前子样本, 非门槛): "
+                                           f"主清单 {dg.get('n_main')} 组 / 子样本 {dg.get('n_diag')} 组 / "
+                                           f"重合 {len(dg.get('overlap', []))} — "
+                                           + (f"仅主清单: {', '.join(dg.get('main_only', []))}"
+                                              if dg.get('main_only') else '完全重合'))
+                        with st.expander("BH 存活组明细 (survive=1):"):
+                            surv = fv['results'][fv['results']['survive'] == 1].copy()
+                            if not surv.empty:
+                                show_sv = surv.head(60)[[
+                                    'window', 'region', 'family', 'index_code', 'direction',
+                                    'n', 'car_mean', 't_stat', 'p_value', 'q_value',
+                                    'overlay_eligible', 'eligible_reason']].rename(columns={
+                                        'window': '窗口', 'region': '地区', 'family': '事件家族',
+                                        'index_code': '指数', 'direction': '意外方向', 'n': '样本n',
+                                        'car_mean': 'CAR%', 't_stat': 't值', 'p_value': 'p值',
+                                        'q_value': 'q值', 'overlay_eligible': '入选',
+                                        'eligible_reason': '说明'})
+                                st.dataframe(show_sv, use_container_width=True, hide_index=True)
+                                st.caption("存活≠入选: [0,+0] 无可封锁日、[-5,+10] 含事件前窗、"
+                                           "正CAR(只减不加原则)、n<30、覆盖率>50% 均只记录不行动")
+                        with st.expander("封锁日台账 (macro_overlay_days, 追加式永不改写):"):
+                            if fv['ledger']:
+                                ld_df = pd.DataFrame([{
+                                    '股票': l['code'], '封锁日数': l['n_days'],
+                                    '区间': f"{l['s']} ~ {l['e']}"} for l in fv['ledger']])
+                                st.dataframe(ld_df, use_container_width=True, hide_index=True)
+                            else:
+                                st.caption("台账为空")
+                            st.caption("台账刷新由每日管道执行(守卫=完整性截断日, 已入库净值日期永不回补封锁); "
+                                       "配置冻结后宏观研究重跑不自动更新 overlay(需新的预注册决策)")
+
     # --- Tab 7: 策略回测 (模块5: D1引擎 + D2双段批量回测) ---
     # 渲染次序说明: 本块置于 Tab 6(含st.stop)之前, 与 Tab 8 同理; 且本块自身
     # 全程条件渲染, 任何分支都不使用 st.stop(), 保证8个标签页均能完整渲染
@@ -2089,7 +2164,7 @@ elif page == "量化分析":
 
         n_bt_runs = _bt_runs_count()
         with st.expander("⚙️ 回测运行管理", expanded=(n_bt_runs == 0)):
-            st.caption("D2 批量回测 = 7策略×2段(full/oos)×3费率 + 双基准×2段, 多批次入库:"
+            st.caption("D2 批量回测 = 8策略×2段(full/oos)×3费率 + 双基准×2段, 多批次入库:"
                        " 跨日批次保留作对照(如 模块8扩窗批次 vs 2026-09-03冻结批次), 同日重跑只覆盖当日批次;"
                        " 选型参数已按 D2.0 协议冻结(2026-08-31), 重跑只刷新数据不改选型;"
                        " forward 样本(2026-09起)以 run_date 追加式入库, 不受影响")
@@ -2135,7 +2210,7 @@ elif page == "量化分析":
                            daily_win_rate, seg1_annual, seg2_annual, n_trades,
                            avg_trade_ret, avg_stat_ret, avg_gap_cost, avg_fund_util,
                            n_triggers, n_rejected, n_end_dropped, excess_vs_bh,
-                           excess_vs_index, run_date
+                           excess_vs_index, run_date, n_macro_blocked
                     FROM backtest_runs WHERE run_date=?
                     ORDER BY strategy_id, segment, fee""", (bt_batch_date,)).fetchall()
                 eq_rows = conn.execute("""
@@ -2214,7 +2289,8 @@ elif page == "量化分析":
             # ---- ② 净值对比图 ----
             st.write(f"**② 净值曲线 · {bt_seg} 段 (费率0, 策略 vs B1买入持有 vs B2大盘指数)**")
             bt_colors = {'S1a': '#E53935', 'S1b': '#FB8C00', 'S1c': '#43A047',
-                         'S1d': '#8E24AA', 'S1e': '#00ACC1', 'S2': '#1E88E5'}
+                         'S1d': '#8E24AA', 'S1e': '#00ACC1', 'S2': '#1E88E5',
+                         'S2M': '#5E35B1', 'S1aM': '#00897B'}
             fig_bt = go.Figure()
             for sid in bt_sids:
                 xs, ys = _bt_curve(sid, bt_seg)
@@ -2293,6 +2369,47 @@ elif page == "量化分析":
             st.dataframe(cmp_df, use_container_width=True, hide_index=True)
             st.caption("FULL=工程验证栏(收益仅作机制对照) · OOS=证据参考栏 · 超额为 oos 段总收益与"
                        "同窗口 B1/B2 之差(pp) · 夏普空=无交易")
+
+            # ---- ④b 宏观 Overlay 机制对照 (模块9) ----
+            _overlay_pairs = [(m, p) for m, p in (('S2M', 'S2'), ('S1aM', 'S1a'))
+                              if _bt_run(m, 'full') or _bt_run(m, 'oos')]
+            if _overlay_pairs:
+                st.write("**④b 宏观 Overlay 机制对照 (模块9: S*M = 原版 + 宏观封锁日不开新仓)**")
+                ov_rows = []
+                for m_id, p_id in _overlay_pairs:
+                    for seg in ('full', 'oos'):
+                        mr, pr = _bt_run(m_id, seg), _bt_run(p_id, seg)
+                        if not (mr and pr):
+                            continue
+                        ov_rows.append({
+                            '对照': f"{m_id} vs {p_id}", '段': seg,
+                            '原版收益%': _n(pr['total_return']),
+                            'Overlay收益%': _n(mr['total_return']),
+                            '收益差pp': _n((mr['total_return'] or 0)
+                                           - (pr['total_return'] or 0)) if (mr['total_return'] is not None and pr['total_return'] is not None) else None,
+                            '原版回撤%': _n(pr['max_drawdown']),
+                            'Overlay回撤%': _n(mr['max_drawdown']),
+                            '原版笔数': pr['n_trades'], 'Overlay笔数': mr['n_trades'],
+                            '封锁次数': mr['n_macro_blocked'],
+                        })
+                if ov_rows:
+                    ov_df = pd.DataFrame(ov_rows)
+                    for c in ['原版收益%', 'Overlay收益%', '收益差pp', '原版回撤%',
+                              'Overlay回撤%', '原版笔数', 'Overlay笔数', '封锁次数']:
+                        ov_df[c] = pd.to_numeric(ov_df[c], errors='coerce')
+                    st.dataframe(ov_df, use_container_width=True, hide_index=True)
+                try:
+                    _ov_meta = quant_data.load_fdr_view()['overlay_meta'].get('config', {})
+                except Exception:
+                    _ov_meta = {}
+                _ov_groups = _ov_meta.get('groups', [])
+                if _ov_groups:
+                    st.caption("封锁家族(FDR 入选, 配置已冻结): " + "; ".join(
+                        f"{g['group_id'].replace('|', ' · ')} · 封锁{g['window_days']}日"
+                        for g in _ov_groups))
+                st.warning("**机制对照, 非证据**: overlay 家族由含知识截止后数据的研究窗口选出(选择泄漏), "
+                           "S*M 的 full/oos 结果均只演示封锁机制本身; 交易差为负≠纯封锁数, 因封锁释放槽位后"
+                           "后续触发可入场(槽位级联)。唯一干净裁决 = 📡 前向跟踪页的 overlay 并行对照")
 
             st.write(f"**⑤ 绩效指标明细 · {bt_seg} 段 × 费率 {bt_fee * 100:.1f}%**")
             det_rows = []
@@ -2415,18 +2532,20 @@ elif page == "量化分析":
                     '成交笔数': r['n_trades'],
                     '满仓拒绝': r['n_rejected'],
                     '末端放弃': r['n_end_dropped'],
+                    '宏观封锁': r['n_macro_blocked'],
                     '触发密度(次/月)': round(r['n_triggers'] / months, 2),
                     '资金占用率%': _n(r['avg_fund_util']),
                     '均跳空成本pp': _n(r['avg_gap_cost']),
                 })
             if dg_rows:
                 dg_df = pd.DataFrame(dg_rows)
-                for c in ['触发数', '成交笔数', '满仓拒绝', '末端放弃',
+                for c in ['触发数', '成交笔数', '满仓拒绝', '末端放弃', '宏观封锁',
                           '触发密度(次/月)', '资金占用率%', '均跳空成本pp']:
                     dg_df[c] = pd.to_numeric(dg_df[c], errors='coerce')
                 st.dataframe(dg_df, use_container_width=True, hide_index=True)
                 st.caption("满仓拒绝 = K=3槽位全占用时被放弃的信号(容量约束); 末端放弃 = 数据末端"
-                           "无法完成完整持有期的信号; 资金占用率 = 持仓槽市值占比均值")
+                       "无法完成完整持有期的信号; 宏观封锁 = overlay 变体在封锁日放弃的开仓数"
+                       "(仅 S*M 列有值); 资金占用率 = 持仓槽市值占比均值")
 
             # ---- ⑩ 协议与诚实性声明 + 自动结论 ----
             st.divider()
@@ -2441,7 +2560,11 @@ elif page == "量化分析":
             st.write("**⑩ 自动结论**")
             conclusions = []
             oos_strats = [(_bt_run(sid, 'oos'), sid) for sid in bt_strats]
-            oos_valid = [(r, sid) for r, sid in oos_strats if r and r['excess_vs_bh'] is not None]
+            # overlay 变体(S*M)不参与"样本外最强"评选: 其 oos 优势可能来自选择泄漏(模块9)
+            _is_overlay = lambda sid: bool(
+                quant_data.BT_STRATEGIES.get(sid, {}).get('overlay'))
+            oos_valid = [(r, sid) for r, sid in oos_strats
+                         if r and r['excess_vs_bh'] is not None and not _is_overlay(sid)]
             if oos_valid:
                 best_r, best_sid = max(oos_valid, key=lambda x: x[0]['excess_vs_bh'])
                 conclusions.append(
@@ -2452,14 +2575,26 @@ elif page == "量化分析":
                     f"成交 {best_r['n_trades']} 笔")
                 oos_fee3 = [(_bt_run(sid, 'oos', 0.003), sid) for sid in bt_strats]
                 fee_robust = [f"{sid}" for r, sid in oos_fee3
-                              if r and r['total_return'] is not None and r['total_return'] > 0]
+                              if r and r['total_return'] is not None and r['total_return'] > 0
+                              and not _is_overlay(sid)]
                 fee_fragile = [f"{sid}" for r, sid in oos_fee3
-                               if r and r['total_return'] is not None and r['total_return'] <= 0]
+                               if r and r['total_return'] is not None and r['total_return'] <= 0
+                               and not _is_overlay(sid)]
                 if fee_robust:
                     conclusions.append(f"**费率稳健**(0.3%费率下 oos 仍为正): {', '.join(fee_robust)}")
                 if fee_fragile:
                     conclusions.append(f"**费率脆弱**(0.3%费率下 oos 转负, 实盘按0.3%双边成本将亏损): "
                                        f"{', '.join(fee_fragile)}")
+            for m_id, p_id in (('S2M', 'S2'), ('S1aM', 'S1a')):
+                mr, pr = _bt_run(m_id, 'oos'), _bt_run(p_id, 'oos')
+                if mr and pr and mr['n_macro_blocked']:
+                    d_pp = ((mr['total_return'] or 0) - (pr['total_return'] or 0)) * 100 \
+                        if (mr['total_return'] is not None and pr['total_return'] is not None) else None
+                    conclusions.append(
+                        f"**Overlay 机制对照 {m_id}**: oos 段封锁 {mr['n_macro_blocked']} 次开仓"
+                        + (f", 收益差 {d_pp:+.1f}pp" if d_pp is not None else "")
+                        + " — 家族选择用了研究窗口全量数据(含 oos 期), 该差异不构成证据, "
+                          "转正/淘汰由前向样本裁决(规则预注册)")
             for r, sid in oos_strats:
                 if not r or not r['n_triggers']:
                     conclusions.append(f"**无法样本外验证**: {sid} oos 段 0 触发(测试窗内无该类事件/信号), "
@@ -3009,7 +3144,8 @@ elif page == "量化分析":
             "追加式入库 · 裁决规则预注册 · 净值从 1 重起，与回测 oos 段严格分离")
 
         # ---------- ① 每日管道 ----------
-        st.markdown("**① 每日管道**（收盘后运行一次：行情 → 指数 → 指标 → 信号扫描 → 宽表 → 前向记录 → 新鲜度）")
+        st.markdown("**① 每日管道**（收盘后运行一次：行情 → 指数 → 指标 → 信号扫描 → 宽表 → "
+                    "宏观日历重采(近3天) → 封锁日台账追加(守卫=完整性截断日) → 前向记录 → 新鲜度）")
         pc1, pc2 = st.columns([1, 2])
         with pc1:
             if st.button("▶️ 运行每日管道", type="primary", key="m7_pipe_run"):
@@ -3088,6 +3224,27 @@ elif page == "量化分析":
         except Exception as e:
             st.error(f"裁决面板读取失败: {e}")
 
+        # ---------- ③b Overlay 前向裁决 (模块9) ----------
+        st.markdown("**③b 宏观 Overlay 裁决**（S*M = 原版 + 宏观封锁日不开新仓；"
+                    "规则预注册于 forward_meta.overlay_protocol，回测段仅为机制对照）")
+        try:
+            _ov = quant_data.evaluate_overlay()
+            st.dataframe(pd.DataFrame([{
+                "策略": o['strategy_id'], "名称": o['name'],
+                "对照原版": o['parent_id'],
+                "样本进度": o['progress'],
+                "宏观封锁": o['macro_blocked'],
+                "超额vs B1 (S*M)": f"{o['excess_vs_b1']:+.2%}" if o['excess_vs_b1'] is not None else "—",
+                "超额vs B1 (原版)": f"{o['parent_excess_vs_b1']:+.2%}" if o['parent_excess_vs_b1'] is not None else "—",
+                "回撤(S*M)": f"{o['max_drawdown']:.1%}" if o['max_drawdown'] is not None else "—",
+                "回撤(原版)": f"{o['parent_max_drawdown']:.1%}" if o['parent_max_drawdown'] is not None else "—",
+                "当前裁决": o['verdict'],
+            } for o in _ov]), use_container_width=True, hide_index=True)
+            st.caption("淘汰 = overlay 拖累收益(超额低于原版)；保留(转正) = 收益不降且回撤收窄；"
+                       "其余继续观察 · 各需完成 ≥20 笔交易后裁决 · 台账追加式保证重放确定性")
+        except Exception as e:
+            st.error(f"Overlay 裁决面板读取失败: {e}")
+
         # ---------- 前向视图 ----------
         try:
             _view = quant_data.get_forward_view()
@@ -3128,9 +3285,11 @@ elif page == "量化分析":
             for _sid, s in _sts['strategies'].items():
                 _st_rows.append({
                     "策略": _sid, "名称": s['name'],
-                    "身份": "👀 观察" if s.get('observation') else "正式",
+                    "身份": ("🛡 宏观封锁" if s.get('overlay')
+                             else ("👀 观察" if s.get('observation') else "正式")),
                     "触发": s['n_triggers'], "完成交易": s['n_trades'],
                     "拒单": s['rejected'], "尾仓未平": s['end_dropped'],
+                    "宏观封锁": s.get('macro_blocked', 0),
                     "总收益": f"{s['total_return']:+.2%}" if s.get('total_return') is not None else "—",
                     "胜率": f"{s['win_rate']:.1%}" if s.get('win_rate') is not None else "—",
                     "Sharpe": f"{s['sharpe']:.2f}" if s.get('sharpe') is not None else "—",

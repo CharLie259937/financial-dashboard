@@ -7,6 +7,7 @@
 import sqlite3
 import os
 import re
+import bisect
 import pandas as pd
 import numpy as np
 import requests
@@ -2581,6 +2582,15 @@ BT_STRATEGIES = {
                      ('rsi_oversold', '超卖')], 'hold': 5},
     'S1e': {'name': '观察·RSI24超卖持有10日',
             'match': [('rsi24_oversold', '超卖')], 'hold': 10, 'observation': True},
+    # 模块9 overlay 变体(2026-09-06 预注册设计, 见 模块9开发计划.md 2.3):
+    # 触发/持有期/槽位/费率与原版完全一致, 唯一差异=宏观封锁日不开新仓(只做减法);
+    # 家族选择=FDR存活组(q=0.05分层BH, n>=30, car<0), 配置冻结于 macro_overlay_meta;
+    # 回测 full/oos 均为机制对照(选择泄漏), 唯一裁决=forward test
+    'S2M': {'name': '组合·超跌反弹持有5日·宏观封锁',
+            'match': [('boll_break', '跌破下轨'), ('price_limit', '大跌'),
+                      ('rsi_oversold', '超卖')], 'hold': 5, 'overlay': True},
+    'S1aM': {'name': '单信号·大跌持有10日·宏观封锁',
+             'match': [('price_limit', '大跌')], 'hold': 10, 'overlay': True},
 }
 
 # D2.0 知识截止日协议(冻结于 2026-08-31, 详见 模块5开发计划.md):
@@ -2659,11 +2669,14 @@ def _collect_triggers(data, spec):
     return out
 
 
-def _run_strategy_bt(data, triggers, hold, max_pos=BT_MAX_POSITIONS, fee=BT_FEE):
+def _run_strategy_bt(data, triggers, hold, max_pos=BT_MAX_POSITIONS, fee=BT_FEE,
+                     blocked_days=None):
     """槽位制事件回测核心:
     T日触发 → T+1开盘买入 → 持有hold个交易日 → 开盘卖出
     数据末端无法完成完整持仓的信号直接放弃(end_dropped)
-    返回 {'equity','trades','rejected','end_dropped','fund_util','n_triggers'}"""
+    blocked_days(模块9 overlay): {code: set(开仓日)} — 命中封锁日的开仓放弃(macro_blocked),
+    只拒新仓不影响持仓; 默认 None 行为与模块5完全一致(向后兼容)
+    返回 {'equity','trades','rejected','end_dropped','fund_util','n_triggers','macro_blocked'}"""
     # 1) 触发 → 交易计划(先计算索引, 过滤超界)
     plans = []
     end_dropped = 0
@@ -2688,6 +2701,7 @@ def _run_strategy_bt(data, triggers, hold, max_pos=BT_MAX_POSITIONS, fee=BT_FEE)
     slot_busy = [None] * K
     trades, equity, fund_util = [], [], []
     rejected = 0
+    macro_blocked = 0
     for d in data['calendar']:
         for k in range(K):
             pos = slot_busy[k]
@@ -2711,6 +2725,9 @@ def _run_strategy_bt(data, triggers, hold, max_pos=BT_MAX_POSITIONS, fee=BT_FEE)
                 slot_busy[k] = None
         for p in plans:
             if p['b_date'] == d:
+                if blocked_days and d in blocked_days.get(p['code'], ()):
+                    macro_blocked += 1
+                    continue
                 free = next((k for k in range(K) if slot_busy[k] is None), None)
                 if free is None:
                     rejected += 1
@@ -2740,7 +2757,7 @@ def _run_strategy_bt(data, triggers, hold, max_pos=BT_MAX_POSITIONS, fee=BT_FEE)
         fund_util.append(busy_v / total if total > 0 else 0.0)
     return {'equity': equity, 'trades': trades, 'rejected': rejected,
             'end_dropped': end_dropped, 'fund_util': fund_util,
-            'n_triggers': len(triggers)}
+            'n_triggers': len(triggers), 'macro_blocked': macro_blocked}
 
 
 def _perf_metrics(equity, dates, trades=None, fund_util=None):
@@ -2839,10 +2856,11 @@ def _index_baseline(data):
 
 
 def run_backtest(strategy_id, max_pos=BT_MAX_POSITIONS, fee=BT_FEE,
-                 data=None, start_date=None):
+                 data=None, start_date=None, blocked_days=None):
     """单策略回测入口(不写库, 供批量执行与看板调用)
     start_date(oos段)=知识截止日: 仅统计 trade_date > start_date 的触发,
-    日历截取至该日之后, 净值从 1 重起"""
+    日历截取至该日之后, 净值从 1 重起
+    blocked_days(模块9): overlay 策略未显式传入时自动从台账加载"""
     data = data if data is not None else _load_backtest_data()
     if start_date is not None:
         data = _filter_bt_data(data, start_date)
@@ -2850,7 +2868,12 @@ def run_backtest(strategy_id, max_pos=BT_MAX_POSITIONS, fee=BT_FEE,
     triggers = _collect_triggers(data, spec)
     if start_date is not None:
         triggers = [(c, d) for (c, d) in triggers if d > start_date]
-    res = _run_strategy_bt(data, triggers, spec['hold'], max_pos, fee)
+    if spec.get('overlay') and blocked_days is None:
+        blocked_days = _load_overlay_blocked(data)
+    if not spec.get('overlay'):
+        blocked_days = None
+    res = _run_strategy_bt(data, triggers, spec['hold'], max_pos, fee,
+                           blocked_days=blocked_days)
     res['strategy_id'] = strategy_id
     res['strategy_name'] = spec['name']
     res['metrics'] = _perf_metrics(res['equity'], data['calendar'],
@@ -3202,9 +3225,11 @@ def _macro_ar(rets, i0):
     return ar, None
 
 
-def run_macro_study(log=print):
+def run_macro_study(log=print, end_date=None):
     """宏观事件研究: 高重要性事件 × 映射指数, 家族分组 + 意外方向拆分
-    AR/CAR/曲线统计复用共享统计核心 _agg_group / _t_test; 结果写 macro_study_* 表"""
+    AR/CAR/曲线统计复用共享统计核心 _agg_group / _t_test; 结果写 macro_study_* 表
+    end_date(模块9诊断对照): 只纳入 trade_date <= end_date 的事件; 默认 None=全窗口
+    注意: 本函数整表重建 macro_study_*, 诊断对照后必须以 end_date=None 重跑恢复全窗口"""
     conn = get_db()
     create_macro_tables(conn)
     # 指数序列: code → (dates列表, rets列表, date→idx)
@@ -3227,10 +3252,14 @@ def run_macro_study(log=print):
         conn.close()
         raise RuntimeError("benchmark_index 无指数数据, 先采集三大指数")
     # 高重要性事件 → 逐事件×逐指数映射交易日并算 AR
-    evs = conn.execute(
-        "SELECT trade_date, time, region, title, pub_val, forecast_val "
-        "FROM macro_events WHERE star=? ORDER BY trade_date, time",
-        (MACRO_STAR_HIGH,)).fetchall()
+    ev_sql = ("SELECT trade_date, time, region, title, pub_val, forecast_val "
+              "FROM macro_events WHERE star=?")
+    ev_args = [MACRO_STAR_HIGH]
+    if end_date:
+        ev_sql += " AND trade_date <= ?"
+        ev_args.append(end_date)
+    evs = conn.execute(ev_sql + " ORDER BY trade_date, time",
+                       ev_args).fetchall()
     groups = {}                             # (region, family, index, direction) → [ev]
     ev_rows, run_ts = [], datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     for r in evs:
@@ -3292,6 +3321,7 @@ def run_macro_study(log=print):
                      ev_rows)
     meta = {
         'run_ts': run_ts,
+        'study_end_date': end_date or 'full',   # 模块9: 事件窗口截断标记(诊断对照/恢复时可追溯)
         'star_high': MACRO_STAR_HIGH,
         'region_index': {k: v for k, v in MACRO_REGION_INDEX.items()},
         'est_win': list(EST_WIN), 'event_win': [EVENT_WIN[0], EVENT_WIN[-1]],
@@ -3491,6 +3521,9 @@ def _d2_protocol_json():
         'append_rule': 'forward run 以 run_date 追加式入库, 禁止UPDATE已入库的full/oos结果',
         'fees': BT_FEE_SENSITIVITY,
         'strategies': {sid: s['name'] for sid, s in BT_STRATEGIES.items()},
+        'overlay_note': ('S2M/S1aM(模块9) = 原策略+宏观封锁日不开新仓(只做减法); '
+                         'overlay家族经FDR(q=0.05分层BH)选出, 研究窗口含知识截止后数据, '
+                         '故 full/oos 两段均为机制对照(选择泄漏), 唯一裁决=forward test'),
         'baselines': {'B1': '买入持有等权(各股自身首个回测日开盘建仓, oos段在截止日后首个交易日再建仓)',
                       'B2': '三市场指数等权日收益合成(休市日贡献0)'},
     }
@@ -3502,6 +3535,9 @@ def run_d2_backtests():
     入库: backtest_runs(指标) / backtest_equity(日净值, 含同段B1/B2对照列) /
           backtest_trades(交易明细) / backtest_meta(协议参数 + 双段完整结果JSON)"""
     data = _load_backtest_data()
+    # 封锁日集必须在首个写事务开始前预载: 批量入库是数万行未提交大事务,
+    # 缓存溢出后SQLite持EXCLUSIVE锁, 事务中途新连接读台账必被拒(问题日志#3)
+    overlay_blocked = _load_overlay_blocked(data)
     conn = get_db()
     create_backtest_tables(conn)
     now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -3531,8 +3567,9 @@ def run_d2_backtests():
             "daily_win_rate, seg1_annual, seg2_annual, "
             "n_trades, avg_trade_ret, avg_stat_ret, avg_gap_cost, avg_fund_util, "
             "n_triggers, n_rejected, n_end_dropped, "
-            "excess_vs_bh, excess_vs_index, params_json, run_date, generated_at) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "excess_vs_bh, excess_vs_index, params_json, run_date, generated_at, "
+            "n_macro_blocked) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (sid, name, kind, seg, fee, cal[0], cal[-1], len(cal), total,
              m.get('annual_return'), m.get('annual_vol'), m.get('sharpe'),
              m.get('max_drawdown'), m.get('mdd_start'), m.get('mdd_end'),
@@ -3544,7 +3581,7 @@ def run_d2_backtests():
              (total - bh_total) if total is not None else None,
              (total - idx_total) if total is not None else None,
              json.dumps(params, ensure_ascii=False, default=str),
-             run_date, now))
+             run_date, now, res.get('macro_blocked', 0)))
         run_id = cur.lastrowid
         for i, d in enumerate(cal):
             conn.execute(
@@ -3592,7 +3629,8 @@ def run_d2_backtests():
         fee0 = {}
         for sid, spec in BT_STRATEGIES.items():
             for fee in BT_FEE_SENSITIVITY:
-                res = run_backtest(sid, BT_MAX_POSITIONS, fee, data, start_date)
+                res = run_backtest(sid, BT_MAX_POSITIONS, fee, data, start_date,
+                                   blocked_days=overlay_blocked)
                 if fee == 0.0:
                     fee0[sid] = res
                 insert_run('strategy', sid, spec['name'], seg, fee, res, cal,
@@ -3608,7 +3646,8 @@ def run_d2_backtests():
                                  'trades': r['trades'],
                                  'n_triggers': r['n_triggers'],
                                  'rejected': r['rejected'],
-                                 'end_dropped': r['end_dropped']}
+                                 'end_dropped': r['end_dropped'],
+                                 'macro_blocked': r.get('macro_blocked', 0)}
                            for sid, r in fee0.items()},
             'baselines': {bid: {'name': b['name'], 'metrics': b['metrics'],
                                 'equity': b['equity']}
@@ -3787,6 +3826,10 @@ def run_forward_step(log=print):
     existing = {(r['strategy_id'], r['trade_date']): r['nav']
                 for r in conn.execute("SELECT strategy_id, trade_date, nav FROM forward_equity")}
 
+    # 模块9: 台账预载于首个写事务之前(问题日志#3同源: 前向窗口增长后
+    # 循环内开新连接读台账会与大事务锁冲突)
+    overlay_blocked = _load_overlay_blocked(fwd)
+
     report = {'ok': True, 'forward_start': FORWARD_START, 'n_days': len(cal),
               'window': [cal[0], cal[-1]],
               'append_caps': {'stocks': stock_cap, 'index': index_cap},
@@ -3820,8 +3863,10 @@ def run_forward_step(log=print):
     for sid, spec in BT_STRATEGIES.items():
         triggers = [(c, d) for (c, d) in _collect_triggers(fwd, spec)
                     if d >= FORWARD_START]
+        # 模块9: overlay 变体用预载封锁日集(台账只追加不改写→重放确定性)
+        blocked = overlay_blocked if spec.get('overlay') else None
         res = _run_strategy_bt(fwd, triggers, spec['hold'],
-                               BT_MAX_POSITIONS, FORWARD_FEE)
+                               BT_MAX_POSITIONS, FORWARD_FEE, blocked_days=blocked)
         metrics = _perf_metrics(res['equity'][:len(cal_stock)], cal_stock,
                                 res['trades'], res['fund_util'])
         for t in res['trades']:
@@ -3846,8 +3891,10 @@ def run_forward_step(log=print):
         total = metrics.get('total_return')
         status_strategies[sid] = {
             'name': spec['name'], 'observation': bool(spec.get('observation')),
+            'overlay': bool(spec.get('overlay')),
             'n_triggers': res['n_triggers'], 'n_trades': len(capped_trades),
             'rejected': res['rejected'], 'end_dropped': res['end_dropped'],
+            'macro_blocked': res.get('macro_blocked', 0),
             'total_return': total, 'sharpe': metrics.get('sharpe'),
             'max_drawdown': metrics.get('max_drawdown'), 'win_rate': win_rate,
             'excess_vs_b1': (total - b1_total) if (total is not None and b1_total is not None) else None,
@@ -3966,6 +4013,14 @@ def run_daily_pipeline(log=print):
     step('indicators', lambda: batch_generate_indicators())
     step('signals', lambda: run_signal_detection())
     step('wide_table', lambda: batch_generate_wide_tables())
+    # 模块9: 宏观采集(最近N天强制重采, 公布值后填) + 封锁日台账追加(守卫=完整性截断日)
+    _today = datetime.now().strftime('%Y-%m-%d')
+    _recent = [(datetime.strptime(_today, '%Y-%m-%d') - timedelta(days=i)
+                ).strftime('%Y-%m-%d') for i in range(MACRO_RECENT_REFRESH)]
+    step('macro', lambda: collect_macro_events(_recent, log=log))
+    _cap = _stock_cap_date()
+    step('overlay_days', lambda: (refresh_overlay_days(min_date=_cap, log=log)
+                                  if _cap else {'skipped': '无行情截断日, 跳过台账刷新'}))
     step('forward', lambda: run_forward_step(log=log))
     report['freshness'] = get_data_freshness()
     for s in report['freshness']['alerts']:
@@ -4237,3 +4292,579 @@ def run_m8_backfill_chain(log=print):
         log(f"  [m8] 宽表 {r['code']}: {r['rows']} 行")
     log("[m8] 链完成 (模块3三口径重算请单独运行 run_module3_analysis)")
     return {'quotes': quotes, 'indicators': inds, 'replay': replay, 'wide': wide}
+
+
+# ============================================================
+# 模块 9: 宏观×策略融合 (2026-09-06)
+# FDR 预注册裁决(BH按窗口分层 q=0.05) → overlay 配置冻结 →
+# 封锁日台账(追加式不改写) → S2M/S1aM 变体(只拒新仓) → 前向裁决
+# 规则与设计见 模块9开发计划.md 二(2026-09-06 看结果前冻结)
+# 红线: 家族选择含知识截止后数据(选择泄漏) → 回测 full/oos 仅机制对照,
+#       唯一裁决 = forward test; 配置冻结后不得依回测/前向结果修改
+# ============================================================
+M9_STUDY_END = '2026-09-03'     # 主裁决研究事件窗口终点(=2026-09-05 00:18 冻结基线)
+FDR_Q = 0.05                    # BH 显著性水平(按窗口分层, 6 族)
+FDR_MIN_N = 30                  # overlay 资格: 组样本量下限
+OVERLAY_MAX_COV = 0.5           # overlay 资格: 单组封锁日覆盖率上限(防退化)
+INDEX_MARKET_CN = {'.INX': '美股', 'HSI': '港股', 'sh000300': 'A股'}   # 指数→市场
+OVERLAY_BLOCKABLE_WINDOWS = ('[0,+1]', '[0,+3]', '[0,+5]', '[0,+10]')  # 可封锁窗口形状
+
+
+def create_m9_tables(conn):
+    """模块9四表(CREATE IF NOT EXISTS) + backtest_runs 追加列(幂等迁移, 旧批次 NULL)"""
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS macro_fdr_results(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_ts TEXT NOT NULL, window TEXT NOT NULL,
+            region TEXT, family TEXT, index_code TEXT, direction TEXT,
+            n INTEGER, car_mean REAL, t_stat REAL, p_value REAL,
+            p_rank INTEGER, m_family INTEGER, bh_critical REAL, q_value REAL,
+            survive INTEGER, overlay_eligible INTEGER, eligible_reason TEXT,
+            run_date TEXT
+        );
+        CREATE TABLE IF NOT EXISTS macro_fdr_meta(
+            key TEXT PRIMARY KEY, value TEXT
+        );
+        CREATE TABLE IF NOT EXISTS macro_overlay_days(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            code TEXT NOT NULL, trade_date TEXT NOT NULL, group_id TEXT NOT NULL,
+            window_days INTEGER, run_ts TEXT, run_date TEXT,
+            UNIQUE(code, trade_date, group_id)
+        );
+        CREATE TABLE IF NOT EXISTS macro_overlay_meta(
+            key TEXT PRIMARY KEY, value TEXT
+        );
+    """)
+    has_bt = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
+                          "AND name='backtest_runs'").fetchone()
+    if has_bt:
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(backtest_runs)")]
+        if 'n_macro_blocked' not in cols:
+            conn.execute("ALTER TABLE backtest_runs ADD COLUMN n_macro_blocked INTEGER")
+    conn.commit()
+
+
+def _bh_stratum(pvals, q):
+    """Benjamini-Hochberg step-up(单层): pvals=[原始p值]
+    返回 (survive标记列表, q_value调整p值列表), 与输入顺序对齐
+    存活 = 满足 p(k) <= q·k/m 的最大 rank k 及其以上全部(升序排列的前 k 个)"""
+    m = len(pvals)
+    survive = [False] * m
+    qvals = [None] * m
+    if m == 0:
+        return survive, qvals
+    order = sorted(range(m), key=lambda i: pvals[i])
+    prev = 1.0
+    for rank in range(m, 0, -1):           # 调整p: 自大rank向小取 min
+        i = order[rank - 1]
+        adj = min(prev, pvals[i] * m / rank)
+        qvals[i] = min(1.0, adj)
+        prev = qvals[i]
+    k_max = 0
+    for rank in range(1, m + 1):
+        i = order[rank - 1]
+        if pvals[i] <= q * rank / m:
+            k_max = rank
+    for rank in range(1, k_max + 1):
+        survive[order[rank - 1]] = True
+    return survive, qvals
+
+
+def _m9_load_events(conn, end_date=None):
+    """高重要性事件一次加载 → [(trade_date, time, region, family, direction)]
+    家族/方向判定与 run_macro_study 同口径; 排除'其他'家族与未映射地区"""
+    sql = ("SELECT trade_date, time, region, title, pub_val, forecast_val "
+           "FROM macro_events WHERE star=?")
+    args = [MACRO_STAR_HIGH]
+    if end_date:
+        sql += " AND trade_date <= ?"
+        args.append(end_date)
+    out = []
+    for r in conn.execute(sql + " ORDER BY trade_date, time", args):
+        if r['region'] not in MACRO_REGION_INDEX:
+            continue
+        fam = _macro_family(r['title'])
+        if fam == '其他':
+            continue
+        out.append((r['trade_date'], r['time'] or '', r['region'], fam,
+                    _macro_direction(r['pub_val'], r['forecast_val'])))
+    return out
+
+
+def _m9_events_for_group(events, region, family, direction):
+    """组事件过滤(与 run_macro_study 建组口径严格一致):
+    family='全部高重要性' → 聚合该地区全部家族(研究侧的 key_all 聚合组)
+    direction='全部' → 不按方向过滤(含方向不可解析事件)"""
+    if family == '全部高重要性':
+        if direction == '全部':
+            return [e for e in events if e[2] == region]
+        return [e for e in events if e[2] == region and e[4] == direction]
+    if direction == '全部':
+        return [e for e in events if e[2] == region and e[3] == family]
+    return [e for e in events if e[2] == region and e[3] == family
+            and e[4] == direction]
+
+
+def _m9_stock_calendars(conn):
+    """池内股票日历: code → {'market', 'dates'(ISO升序列表)}(池为唯一事实源)"""
+    out = {}
+    for s in get_stock_pool(active_only=True):
+        ds = [r[0] for r in conn.execute(
+            "SELECT trade_date FROM daily_quotes WHERE code=? ORDER BY trade_date",
+            (s['code'],))]
+        if ds:
+            out[s['code']] = {'market': s.get('market', 'A股'), 'dates': ds}
+    return out
+
+
+def _m9_index_calendars(conn):
+    """指数日历: index_code → (market, 升序date对象列表)"""
+    out = {}
+    for code, market in [('.INX', 'us'), ('HSI', 'hk'), ('sh000300', 'cn')]:
+        ds = [datetime.strptime(r[0], '%Y-%m-%d').date()
+              for r in conn.execute(
+                  "SELECT trade_date FROM benchmark_index WHERE code=? "
+                  "ORDER BY trade_date", (code,))]
+        if ds:
+            out[code] = (market, ds)
+    return out
+
+
+def _m9_block_dates(code_dates, index_code, index_cals, group_events, n_days):
+    """单股封锁日集: 事件→指数日历 t_day → 该股日历上 t_day 之后前 n_days 个交易日
+    (不含 t 当日, 与全框架 T+1 成交惯例一致; 指数数据末端外的事件跳过)"""
+    ent = index_cals.get(index_code)
+    if ent is None or n_days <= 0:
+        return set()
+    market, idx_dates = ent
+    blocks = set()
+    for ev in group_events:
+        ev_date = datetime.strptime(ev[0], '%Y-%m-%d').date()
+        et = None
+        if ev[1]:
+            hh, mm = (ev[1].split(':') + ['0'])[:2]
+            et = dtime(int(hh), int(mm))
+        t_day = macro_event_trading_day(ev_date, et, market, idx_dates)
+        if t_day is None:
+            continue
+        i = bisect.bisect_right(code_dates, t_day.isoformat())
+        blocks.update(code_dates[i:i + n_days])
+    return blocks
+
+
+def _m9_group_coverage(group_events, index_code, n_days, stock_cals, index_cals,
+                       win_start, win_end):
+    """该组在各映射股票上的封锁日覆盖率 {code: 比例}
+    分母 = 该股研究窗口内交易日数; 无映射池内股票 → {}"""
+    cov = {}
+    for code, sc in stock_cals.items():
+        if sc['market'] != INDEX_MARKET_CN.get(index_code):
+            continue
+        blocks = _m9_block_dates(sc['dates'], index_code, index_cals,
+                                 group_events, n_days)
+        lo = bisect.bisect_left(sc['dates'], win_start)
+        hi = bisect.bisect_right(sc['dates'], win_end)
+        denom = hi - lo
+        cov[code] = (len(blocks) / denom) if denom > 0 else 0.0
+    return cov
+
+
+def _fdr_on_current_study(conn, q, min_n, max_cov, study_end, log=print):
+    """对当前 macro_study_results 做分层BH + overlay资格判定(预注册规则)
+    返回 (rows, eligible, strata):
+      rows = 全部组×窗口裁决明细(供 macro_fdr_results 入库)
+      eligible = 入选组配置列表(组级最短窗口)
+      strata = {window: {m, n_survive, n_eligible}}"""
+    res_rows = conn.execute(
+        "SELECT group_id, region, family, index_code, direction, window, "
+        "n, car_mean, t_stat, p_value FROM macro_study_results").fetchall()
+    if not res_rows:
+        log("  [fdr] macro_study_results 为空, 先运行 run_macro_study")
+        return [], [], {}
+    # --- BH 按窗口分层(6 窗口 = 6 独立检验族; p缺失的行不参与检验) ---
+    by_window = {}
+    for i, r in enumerate(res_rows):
+        by_window.setdefault(r['window'], []).append(i)
+    survive = [False] * len(res_rows)
+    q_value = [None] * len(res_rows)
+    p_rank = [None] * len(res_rows)
+    m_family = [None] * len(res_rows)
+    bh_crit = [None] * len(res_rows)
+    strata = {}
+    for win, idxs in sorted(by_window.items()):
+        testable = [i for i in idxs if res_rows[i]['p_value'] is not None]
+        m = len(testable)
+        order = sorted(testable, key=lambda i: res_rows[i]['p_value'])
+        for rank, i in enumerate(order, 1):
+            p_rank[i] = rank
+            m_family[i] = m
+            bh_crit[i] = round(q * rank / m, 6) if m else None
+        sv, qv = _bh_stratum([res_rows[i]['p_value'] for i in testable], q)
+        for j, i in enumerate(testable):
+            survive[i] = sv[j]
+            q_value[i] = qv[j]
+        strata[win] = {'m': m, 'n_survive': sum(sv), 'n_eligible': 0}
+    # --- overlay 资格: 四条件 + 覆盖率护栏(预注册, 逐条可追溯) ---
+    events = _m9_load_events(conn, end_date=study_end)
+    stock_cals = _m9_stock_calendars(conn)
+    index_cals = _m9_index_calendars(conn)
+    win_start = min((e[0] for e in events), default=None) or '2000-01-01'
+    rows = []
+    cov_cache = {}
+    for i, r in enumerate(res_rows):
+        direction = r['direction'] or '全部'
+        p = r['p_value']
+        if p is None:
+            eligible, reason = 0, 'p值缺失(不可检验)'
+        elif not survive[i]:
+            eligible, reason = 0, f'BH未存活(q={q}, q_value={q_value[i]:.4f})'
+        elif (r['n'] or 0) < min_n:
+            eligible, reason = 0, f"n={r['n']}<{min_n}(小样本伪影)"
+        elif (r['car_mean'] or 0) >= 0:
+            eligible, reason = 0, 'CAR≥0(只减不加, 正CAR组只记录不行动)'
+        elif r['window'] not in OVERLAY_BLOCKABLE_WINDOWS:
+            eligible, reason = 0, ('[0,+0]无可封锁日' if r['window'] == '[0,+0]'
+                                   else '[-5,+10]含事件前窗口, 均只参与FDR')
+        else:
+            n_days = int(r['window'].split('+')[1].rstrip(']'))
+            ck = (r['region'], r['family'], r['index_code'], direction, n_days)
+            if ck not in cov_cache:
+                grp_ev = _m9_events_for_group(events, r['region'], r['family'],
+                                              direction)
+                cov_cache[ck] = _m9_group_coverage(
+                    grp_ev, r['index_code'], n_days, stock_cals, index_cals,
+                    win_start, study_end)
+            cov = cov_cache[ck]
+            worst = max(cov.values()) if cov else 0.0
+            if worst > max_cov:
+                eligible = 0
+                worst_code = max(cov, key=cov.get)
+                reason = (f'覆盖率{worst:.0%}>{max_cov:.0%}(退化护栏, {worst_code})')
+            elif not cov:
+                eligible, reason = 1, '四条件+护栏通过(无映射池内股票, 不产生封锁日)'
+            else:
+                eligible, reason = 1, '四条件+护栏通过'
+        if eligible:
+            strata[r['window']]['n_eligible'] += 1
+        rows.append({
+            'window': r['window'], 'region': r['region'], 'family': r['family'],
+            'index_code': r['index_code'], 'direction': direction,
+            'n': r['n'], 'car_mean': r['car_mean'], 't_stat': r['t_stat'],
+            'p_value': p, 'p_rank': p_rank[i], 'm_family': m_family[i],
+            'bh_critical': bh_crit[i], 'q_value': q_value[i],
+            'survive': int(survive[i]), 'overlay_eligible': eligible,
+            'eligible_reason': reason,
+            '_group_id': r['group_id'], '_n_days': (int(r['window'].split('+')[1].rstrip(']'))
+                                                    if r['window'] in OVERLAY_BLOCKABLE_WINDOWS else None),
+            '_coverage': cov_cache.get((r['region'], r['family'], r['index_code'],
+                                        direction,
+                                        int(r['window'].split('+')[1].rstrip(']'))
+                                        if r['window'] in OVERLAY_BLOCKABLE_WINDOWS else -1), {}),
+        })
+    # --- 组级最短窗口选择(同组多窗口合格 → 取最小N, 最小干预) ---
+    elig_by_group = {}
+    for row in rows:
+        if row['overlay_eligible']:
+            elig_by_group.setdefault(row['_group_id'], []).append(row)
+    selected = {gid: min(rlist, key=lambda x: x['_n_days'])
+                for gid, rlist in elig_by_group.items()}
+    for row in rows:
+        if (row['overlay_eligible'] and row['_group_id'] in selected
+                and row['_n_days'] != selected[row['_group_id']]['_n_days']):
+            row['eligible_reason'] += (
+                f"(同组取更短窗口N={selected[row['_group_id']]['_n_days']})")
+    eligible_cfg = []
+    for gid in sorted(selected):
+        s = selected[gid]
+        eligible_cfg.append({
+            'group_id': gid, 'region': s['region'], 'family': s['family'],
+            'index_code': s['index_code'], 'direction': s['direction'],
+            'window_days': s['_n_days'], 'n': s['n'],
+            'car_mean': s['car_mean'], 't_stat': s['t_stat'],
+            'p_value': s['p_value'], 'q_value': s['q_value'],
+            'coverage': {k: round(v, 4) for k, v in s['_coverage'].items()},
+        })
+    log(f"  [fdr] {len(res_rows)} 行(267组×6窗口口径) → BH存活 "
+        f"{sum(strata[w]['n_survive'] for w in strata)} 行, 资格通过 "
+        f"{sum(strata[w]['n_eligible'] for w in strata)} 行, 入选组 {len(eligible_cfg)}")
+    return rows, eligible_cfg, strata
+
+
+def run_macro_fdr(q=FDR_Q, min_n=FDR_MIN_N, max_cov=OVERLAY_MAX_COV,
+                  force=False, log=print):
+    """模块9 主裁决入口: BH分层FDR + 诊断对照 + overlay配置冻结
+    执行序列(严格, 规则见 模块9开发计划.md 二):
+      ① 主裁决研究重算(事件 ≤ M9_STUDY_END, 复现冻结基线) → FDR → rows/入选组
+      ② 诊断对照: 知识截止前子样本重跑研究+同规则FDR(非门槛, 只报告重合度)
+      ③ 恢复主裁决研究窗口
+      ④ macro_fdr_results 全量重建 + meta 入库
+      ⑤ overlay 配置冻结(macro_overlay_meta.config/adjudication +
+         forward_meta.overlay_protocol 独立键)
+    force: 配置已冻结时默认拒绝重裁(冻结纪律); 显式 force=True 才允许新预注册决策"""
+    conn = get_db()
+    create_m9_tables(conn)
+    frozen = conn.execute("SELECT value FROM macro_overlay_meta "
+                          "WHERE key='config'").fetchone()
+    conn.close()
+    if frozen and not force:
+        return {'error': ('overlay 配置已冻结(纪律: 不得依结果修改); '
+                          '如需新的预注册裁决请 force=True 显式执行')}
+
+    log(f"[fdr] ① 主裁决研究重算(事件窗口 ≤ {M9_STUDY_END})...")
+    run_macro_study(log=log, end_date=M9_STUDY_END)
+    conn = get_db()
+    create_m9_tables(conn)
+    run_ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    run_date = datetime.now().strftime('%Y-%m-%d')
+    rows, eligible, strata = _fdr_on_current_study(conn, q, min_n, max_cov,
+                                                   M9_STUDY_END, log=log)
+    study_meta = {r['key']: r['value'] for r in conn.execute(
+        "SELECT key, value FROM macro_study_meta")}
+    # ② 诊断对照(知识截止前子样本, 同规则) + ③ 恢复(异常也必须恢复)
+    diag = None
+    try:
+        log(f"[fdr] ② 诊断对照: 知识截止前子样本(事件 ≤ {BT_KNOWLEDGE_CUTOFF})...")
+        run_macro_study(log=log, end_date=BT_KNOWLEDGE_CUTOFF)
+        _, diag_eligible, _ = _fdr_on_current_study(conn, q, min_n, max_cov,
+                                                    BT_KNOWLEDGE_CUTOFF, log=log)
+        a = {g['group_id'] for g in eligible}
+        b = {g['group_id'] for g in diag_eligible}
+        diag = {
+            'cutoff': BT_KNOWLEDGE_CUTOFF,
+            'n_main': len(a), 'n_diag': len(b),
+            'overlap': sorted(a & b), 'main_only': sorted(a - b),
+            'diag_only': sorted(b - a),
+            'zero_survival_warning': bool(a and not b),
+            'note': ('诊断对照非门槛, 主裁决不因对照结果改变; '
+                     '主清单在子样本零存活=选择泄漏脆弱性, 必须显著标注'),
+        }
+    finally:
+        log(f"[fdr] ③ 恢复主裁决研究窗口(事件 ≤ {M9_STUDY_END})...")
+        run_macro_study(log=log, end_date=M9_STUDY_END)
+
+    # ④ FDR 结果入库(每次裁决全量重建)
+    conn.execute("DELETE FROM macro_fdr_results")
+    conn.executemany(
+        "INSERT INTO macro_fdr_results(run_ts, window, region, family, index_code, "
+        "direction, n, car_mean, t_stat, p_value, p_rank, m_family, bh_critical, "
+        "q_value, survive, overlay_eligible, eligible_reason, run_date) "
+        "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        [(run_ts, r['window'], r['region'], r['family'], r['index_code'],
+          r['direction'], r['n'], r['car_mean'], r['t_stat'], r['p_value'],
+          r['p_rank'], r['m_family'], r['bh_critical'], r['q_value'],
+          r['survive'], r['overlay_eligible'], r['eligible_reason'], run_date)
+         for r in rows])
+    protocol = {
+        'frozen_at': '2026-09-06', 'method': 'Benjamini-Hochberg step-up',
+        'q': q, 'stratified_by': 'window(6族: [0,+0]/[0,+1]/[0,+3]/[0,+5]/[0,+10]/[-5,+10])',
+        'min_n': min_n, 'max_cov': max_cov,
+        'eligibility': ('①BH存活 ②n>=30 ③car_mean<0(只减不加) '
+                        '④窗口[0,+N]且N>=1; 护栏: 单组封锁日覆盖率>50%不入选; '
+                        '同组多窗口取最短N'),
+        'main_adjudication_window': f'2023-01-02 ~ {M9_STUDY_END}(=2026-09-05冻结基线)',
+        'selection_leakage_disclosure': ('研究窗口含知识截止(2026-05-01)后数据, '
+                                         'overlay回测full/oos均为机制对照, 唯一裁决=forward'),
+    }
+    last_run = {
+        'run_ts': run_ts, 'q': q, 'min_n': min_n, 'max_cov': max_cov,
+        'n_rows': len(rows), 'n_survive_rows': sum(r['survive'] for r in rows),
+        'n_eligible_rows': sum(r['overlay_eligible'] for r in rows),
+        'n_eligible_groups': len(eligible), 'strata': strata,
+        'study_baseline': {'n_events': study_meta.get('n_events'),
+                           'n_groups': study_meta.get('n_groups')},
+    }
+    for k, v in (('protocol', protocol), ('last_run', last_run)):
+        conn.execute("INSERT OR REPLACE INTO macro_fdr_meta VALUES (?,?)",
+                     (k, json.dumps(v, ensure_ascii=False)))
+
+    # ⑤ overlay 配置冻结(交付后不再依回测/前向结果修改)
+    config = {
+        'frozen_at': run_ts, 'fdr_run_ts': run_ts, 'q': q, 'min_n': min_n,
+        'max_cov': max_cov, 'study_window': ['2023-01-02', M9_STUDY_END],
+        'groups': eligible,
+        'mechanism': ('事件t日(指数日历映射)→该股t+1..t+N开仓日封锁, 只拒新仓不影响持仓; '
+                      '多组取并集; 台账(macro_overlay_days)追加式永不改写, '
+                      '管道刷新只追加 trade_date > 完整性截断日 的决策'),
+        'note': '配置冻结; 宏观研究重跑不自动更新overlay(需新的预注册决策)',
+    }
+    adjudication = {
+        'pre_registered': '2026-09-06', 'min_trades': FORWARD_ADJ_MIN_TRADES,
+        'rules': ('S*M完成交易>=20后, 与原版S*同窗口前向对比: '
+                  'excess_vs_B1(S*M)<excess_vs_B1(S*) → 淘汰; '
+                  'excess_vs_B1(S*M)>=excess_vs_B1(S*) 且 max_drawdown收窄 → 保留(转正); '
+                  '其余 → 继续观察'),
+        'freeze_note': '裁决规则预注册, 不得依前向结果修改(与回测冻结协议同源)',
+        'honesty': 'S*M回测full/oos为机制对照(选择泄漏), 唯一裁决=forward test',
+    }
+    conn.execute("INSERT OR REPLACE INTO macro_overlay_meta VALUES (?,?)",
+                 ('config', json.dumps(config, ensure_ascii=False)))
+    conn.execute("INSERT OR REPLACE INTO macro_overlay_meta VALUES (?,?)",
+                 ('adjudication', json.dumps(adjudication, ensure_ascii=False)))
+    if diag is not None:
+        conn.execute("INSERT OR REPLACE INTO macro_fdr_meta VALUES (?,?)",
+                     ('diagnostic_cutoff', json.dumps(diag, ensure_ascii=False)))
+    create_forward_tables(conn)
+    # forward_meta.meta_key 无 UNIQUE 约束 → 先删后插幂等(问题日志#2: 重裁产生重复行)
+    conn.execute("DELETE FROM forward_meta WHERE meta_key='overlay_protocol'")
+    conn.execute("INSERT INTO forward_meta(meta_key, result_json, run_date, generated_at) "
+                 "VALUES('overlay_protocol',?,?,?)",
+                 (json.dumps(adjudication, ensure_ascii=False), run_date, run_ts))
+    conn.commit()
+    conn.close()
+    log(f"[fdr] 裁决完成: 入选组 {len(eligible)} / 267组, "
+        f"诊断对照重合 {len(diag['overlap']) if diag else '-'}"
+        f"{' [警告]主清单子样本零存活' if diag and diag['zero_survival_warning'] else ''}")
+    log("[fdr] 下一步: refresh_overlay_days(min_date=None) 种子台账 → run_d2_backtests")
+    return {'protocol': protocol, 'last_run': last_run, 'eligible': eligible,
+            'diagnostic': diag, 'strata': strata}
+
+
+def refresh_overlay_days(min_date=None, log=print):
+    """封锁日台账追加(幂等: UNIQUE(code,trade_date,group_id) + INSERT OR IGNORE)
+    按冻结配置把入选组事件映射为各股封锁日; min_date 守卫: 只插 trade_date > min_date
+    (已入库净值覆盖的日期永不回补封锁——迟到信息只作用于未来, 见 模块9开发计划.md 2.4)
+    min_date=None → 全历史种子(交付时一次性执行)"""
+    conn = get_db()
+    create_m9_tables(conn)
+    cfg_row = conn.execute("SELECT value FROM macro_overlay_meta "
+                           "WHERE key='config'").fetchone()
+    if not cfg_row:
+        conn.close()
+        return {'error': 'overlay 配置未冻结, 先运行 run_macro_fdr'}
+    cfg = json.loads(cfg_row[0])
+    events = _m9_load_events(conn)             # 全事件(不限窗口, 新事件持续产生封锁)
+    stock_cals = _m9_stock_calendars(conn)
+    index_cals = _m9_index_calendars(conn)
+    run_ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    run_date = datetime.now().strftime('%Y-%m-%d')
+    inserted, per_group = 0, {}
+    for g in cfg['groups']:
+        grp_ev = _m9_events_for_group(events, g['region'], g['family'],
+                                      g['direction'])
+        n_days = g['window_days']
+        n_ins = 0
+        for code, sc in stock_cals.items():
+            if sc['market'] != INDEX_MARKET_CN.get(g['index_code']):
+                continue
+            blocks = _m9_block_dates(sc['dates'], g['index_code'], index_cals,
+                                     grp_ev, n_days)
+            for d in sorted(blocks):
+                if min_date and d <= min_date:
+                    continue
+                cur = conn.execute(
+                    "INSERT OR IGNORE INTO macro_overlay_days"
+                    "(code, trade_date, group_id, window_days, run_ts, run_date) "
+                    "VALUES(?,?,?,?,?,?)",
+                    (code, d, g['group_id'], n_days, run_ts, run_date))
+                n_ins += cur.rowcount
+        per_group[g['group_id']] = n_ins
+        inserted += n_ins
+    conn.commit()
+    total = conn.execute("SELECT COUNT(*) FROM macro_overlay_days").fetchone()[0]
+    conn.close()
+    log(f"[overlay] 台账追加 {inserted} 条(守卫 min_date={min_date}), 台账总计 {total} 条")
+    return {'groups': len(cfg['groups']), 'inserted': inserted,
+            'min_date': min_date, 'ledger_total': total, 'per_group': per_group}
+
+
+def _load_overlay_blocked(data=None):
+    """台账 → {code: set(封锁日)}; data 提供时按池内股票过滤(单一事实源)
+    纯读路径不做DDL(建表在 run_macro_fdr/refresh_overlay_days 写入侧完成;
+    并发写事务存在时DDL会触发 database is locked, 问题日志#1)"""
+    conn = get_db()
+    out = {}
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
+                    "AND name='macro_overlay_days'").fetchone():
+        for r in conn.execute("SELECT code, trade_date FROM macro_overlay_days"):
+            out.setdefault(r['code'], set()).add(r['trade_date'])
+    conn.close()
+    if data is not None and data.get('stocks'):
+        out = {c: ds for c, ds in out.items() if c in data['stocks']}
+    return out
+
+
+def _stock_cap_date():
+    """池内股票行情终局日最小值(完整性截断日, 与 run_forward_step 同口径)"""
+    conn = get_db()
+    pool_f, pool_args = _pool_sql_filter(_pool_code_set())
+    latest = [r[0] for r in conn.execute(
+        f"SELECT MAX(trade_date) FROM daily_quotes WHERE {pool_f} GROUP BY code",
+        pool_args)]
+    conn.close()
+    return min([d for d in latest if d], default=None)
+
+
+def evaluate_overlay():
+    """模块9 overlay 前向裁决读数(规则预注册于 macro_overlay_meta.adjudication)
+    S2M vs S2 / S1aM vs S1a: 各自完成交易 >= FORWARD_ADJ_MIN_TRADES 后对比
+    淘汰=overlay拖累收益; 保留(转正)=收益不降且回撤收窄; 其余继续观察"""
+    status = _forward_status()
+    conn = get_db()
+    # 纯读路径不做DDL(空库时按0计数, 见 问题日志#1 同源约定)
+    has_ft = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
+                          "AND name='forward_trades'").fetchone()
+    out = []
+    for m_id, p_id in (('S2M', 'S2'), ('S1aM', 'S1a')):
+        n = (conn.execute("SELECT COUNT(*) FROM forward_trades WHERE strategy_id=?",
+                          (m_id,)).fetchone()[0] if has_ft else 0)
+        m = status.get('strategies', {}).get(m_id, {})
+        p = status.get('strategies', {}).get(p_id, {})
+        entry = {
+            'strategy_id': m_id, 'parent_id': p_id,
+            'name': m.get('name') or BT_STRATEGIES[m_id]['name'],
+            'n_trades': n, 'min_trades': FORWARD_ADJ_MIN_TRADES,
+            'progress': f"{n}/{FORWARD_ADJ_MIN_TRADES}",
+            'macro_blocked': m.get('macro_blocked'),
+            'excess_vs_b1': m.get('excess_vs_b1'),
+            'parent_excess_vs_b1': p.get('excess_vs_b1'),
+            'max_drawdown': m.get('max_drawdown'),
+            'parent_max_drawdown': p.get('max_drawdown'),
+        }
+        if n >= FORWARD_ADJ_MIN_TRADES and m and p:
+            me, pe = m.get('excess_vs_b1'), p.get('excess_vs_b1')
+            md, pd_ = m.get('max_drawdown'), p.get('max_drawdown')
+            if me is not None and pe is not None and me < pe:
+                entry['verdict'] = '🔴 淘汰建议(overlay 拖累收益)'
+            elif (me is not None and pe is not None and me >= pe
+                  and md is not None and pd_ is not None and md > pd_):
+                entry['verdict'] = '🟢 保留(转正): 收益不降且回撤收窄'
+            else:
+                entry['verdict'] = '🟡 继续观察'
+        else:
+            entry['verdict'] = '⏳ 样本积累中'
+        out.append(entry)
+    conn.close()
+    return out
+
+
+def load_fdr_view():
+    """看板回读: FDR 裁决结果 + 双 meta + overlay 台账统计(纯读, 未裁决时返回空)"""
+    conn = get_db()
+    if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
+                        "AND name='macro_fdr_results'").fetchone():
+        conn.close()
+        return {'results': pd.DataFrame(), 'fdr_meta': {}, 'overlay_meta': {},
+                'ledger': []}
+    res = pd.read_sql_query(
+        "SELECT window, region, family, index_code, direction, n, car_mean, "
+        "t_stat, p_value, p_rank, m_family, bh_critical, q_value, survive, "
+        "overlay_eligible, eligible_reason, run_date FROM macro_fdr_results "
+        "ORDER BY overlay_eligible DESC, p_value", conn)
+
+    def _meta(table):
+        out = {}
+        for r in conn.execute(f"SELECT key, value FROM {table}"):
+            try:
+                out[r['key']] = json.loads(r['value'])
+            except (TypeError, ValueError):
+                out[r['key']] = r['value']
+        return out
+
+    fdr_meta = _meta('macro_fdr_meta')
+    overlay_meta = _meta('macro_overlay_meta')
+    ledger = [dict(r) for r in conn.execute(
+        "SELECT code, COUNT(*) n_days, MIN(trade_date) s, MAX(trade_date) e "
+        "FROM macro_overlay_days GROUP BY code ORDER BY code")]
+    conn.close()
+    return {'results': res, 'fdr_meta': fdr_meta, 'overlay_meta': overlay_meta,
+            'ledger': ledger}

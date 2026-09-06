@@ -176,7 +176,8 @@ def t10_pipeline_last_run():
     if r is None:
         print("  [SKIP] 尚未运行过管道(可接受, 看板会提示)")
         return
-    check("报告含 steps", 'steps' in r and len(r['steps']) == 6,
+    # 模块9 起 8 步: 原六步 + macro(宏观重采) + overlay_days(封锁日台账)
+    check("报告含 steps", 'steps' in r and len(r['steps']) == 8,
           str(list(r.get('steps', {}).keys())))
     check("报告含新鲜度", 'freshness' in r)
 
