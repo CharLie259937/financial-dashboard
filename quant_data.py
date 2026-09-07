@@ -148,9 +148,54 @@ def init_db():
         PRIMARY KEY(code, trade_date)
     );
     CREATE INDEX IF NOT EXISTS idx_di_date ON daily_indicators(trade_date);
+
+    -- 模块10: 股票池动态扩容 (前向资格事件 + 离池快照冻结)
+    CREATE TABLE IF NOT EXISTS forward_pool_events(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        code TEXT NOT NULL, market TEXT, name TEXT,
+        event TEXT NOT NULL,
+        eff_date TEXT NOT NULL,
+        source TEXT,
+        run_ts TEXT
+    );
+    CREATE TABLE IF NOT EXISTS forward_stock_px(
+        code TEXT NOT NULL, trade_date TEXT NOT NULL,
+        open REAL, close REAL,
+        PRIMARY KEY(code, trade_date)
+    );
+    CREATE TABLE IF NOT EXISTS forward_stock_sig(
+        code TEXT NOT NULL, trade_date TEXT NOT NULL,
+        signal_type TEXT NOT NULL, signal_subtype TEXT,
+        PRIMARY KEY(code, trade_date, signal_type, signal_subtype)
+    );
     """)
     conn.commit()
     conn.close()
+
+
+def _m10_migrate_events():
+    """模块10 一次性迁移: 存量池股票补 join 事件(幂等: 事件表空且池非空才写)
+    eff_date = max(FORWARD_START, added_at日期部分) — 原始股=FORWARD_START,
+    迁移前已入池的新股=其 added_at(资格从实际入池日起算, 历史信号不追溯)"""
+    conn = get_db()
+    has_events = conn.execute(
+        "SELECT 1 FROM forward_pool_events LIMIT 1").fetchone()
+    if has_events:
+        conn.close()
+        return {'migrated': 0}
+    pool = conn.execute(
+        "SELECT code, market, name, added_at FROM stock_pool").fetchall()
+    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    for r in pool:
+        added_day = (r['added_at'] or '')[:10]
+        eff = max(FORWARD_START, added_day) if added_day else FORWARD_START
+        conn.execute(
+            "INSERT INTO forward_pool_events(code, market, name, event, "
+            "eff_date, source, run_ts) VALUES(?,?,?,?,?,?,?)",
+            (r['code'], r['market'], r['name'], 'join', eff, 'migrate', now))
+    conn.commit()
+    conn.close()
+    return {'migrated': len(pool)}
 
 
 init_db()
@@ -191,15 +236,28 @@ _migrate_db()
 # ============================================================
 
 def add_to_pool(code, market, name="", sector="", price_threshold=5.0, volume_ratio=2.0):
+    """入池(模块10): 港股代码归一化为5位(collect_hk_daily 落库即 zfill(5),
+    池代码与行情代码不一致会使采集/指标/信号全部链接失败 — 孤儿股根因);
+    新入池/重新激活追加 join 资格事件, 返回归一化后的代码"""
     conn = get_db()
+    code = code.strip().upper()
+    if market == '港股':
+        code = code.zfill(5)
+    existed = conn.execute("SELECT is_active FROM stock_pool WHERE code=?",
+                           (code,)).fetchone()
     conn.execute(
         "INSERT OR REPLACE INTO stock_pool(code, market, name, sector, is_active, price_threshold, volume_ratio, added_at) "
         "VALUES(?,?,?,?,1,?,?,?)",
-        (code.strip().upper(), market, name, sector, price_threshold, volume_ratio,
+        (code, market, name, sector, price_threshold, volume_ratio,
          datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
     )
     conn.commit()
     conn.close()
+    # 模块10: 前向资格事件 — 新入池/重新激活追加 join(eff=今天);
+    # 已在池且活跃的重复添加不追加(防重复事件); 数据引导由 onboard_pool_stock 负责
+    if not (existed and existed[0] == 1):
+        _m10_event(code, 'join', 'add_to_pool')
+    return code
 
 
 def get_stock_pool(active_only=True):
@@ -240,8 +298,12 @@ def get_stock_from_pool(code):
 def remove_from_pool(code):
     """移除股票并级联删除其全部个股数据(行情/信号/事件/因子/宽表)
     2026-09-03 起移除即清理: 否则剔除股残留数据继续进入分析(问题日志#6)
-    停用(不删数据)请用 toggle_stock_active"""
+    2026-09-07 模块10: 生效前冻结前向快照(px+sig)+leave事件(追加式),
+    已入库前向净值仍可由快照逐日复现(追加守卫零失配); 快照失败则中止移除
+    停用(不删数据)请用 set_pool_active"""
     code = code.strip()
+    snap = _snapshot_forward_stock(code)
+    _m10_event(code, 'leave', 'remove_from_pool')
     conn = get_db()
     removed = {}
     for table in ('daily_quotes', 'passive_signals', 'active_events',
@@ -251,14 +313,22 @@ def remove_from_pool(code):
     conn.execute("DELETE FROM stock_pool WHERE code=?", (code,))
     conn.commit()
     conn.close()
+    removed['forward_snapshot'] = snap
     return removed
 
 
 def set_pool_active(code, is_active):
+    """切换活跃状态(模块10): 停用=前向快照+leave(数据保留但不进分析/前向);
+    再激活=新 join(资格从当天重新起算, 旧区间已由快照冻结, 互不污染)"""
     conn = get_db()
     conn.execute("UPDATE stock_pool SET is_active=? WHERE code=?", (1 if is_active else 0, code))
     conn.commit()
     conn.close()
+    if not is_active:
+        _snapshot_forward_stock(code)
+        _m10_event(code, 'leave', 'set_pool_active')
+    elif not _stock_open_membership(code):
+        _m10_event(code, 'join', 'set_pool_active')
 
 
 # ============================================================
@@ -2670,13 +2740,17 @@ def _collect_triggers(data, spec):
 
 
 def _run_strategy_bt(data, triggers, hold, max_pos=BT_MAX_POSITIONS, fee=BT_FEE,
-                     blocked_days=None):
+                     blocked_days=None, drop_incomplete=True):
     """槽位制事件回测核心:
     T日触发 → T+1开盘买入 → 持有hold个交易日 → 开盘卖出
-    数据末端无法完成完整持仓的信号直接放弃(end_dropped)
+    drop_incomplete=True(默认, 回测口径): 数据末端无法完成完整持仓的信号直接放弃(end_dropped)
+    drop_incomplete=False(前向口径): 出场日未到的持仓挂仓盯市(按最新收盘计市值, s_date=None
+    永不触发平仓分支), 不生成交易记录 — 出场日行情终局后由后续确定性重放补录(幂等键防重);
+    开仓日本身超界的触发仍按 end_dropped 跳过(仓位尚未建立, 无可盯市)
     blocked_days(模块9 overlay): {code: set(开仓日)} — 命中封锁日的开仓放弃(macro_blocked),
     只拒新仓不影响持仓; 默认 None 行为与模块5完全一致(向后兼容)
-    返回 {'equity','trades','rejected','end_dropped','fund_util','n_triggers','macro_blocked'}"""
+    返回 {'equity','trades','rejected','end_dropped','fund_util','n_triggers',
+          'macro_blocked','open_positions'}"""
     # 1) 触发 → 交易计划(先计算索引, 过滤超界)
     plans = []
     end_dropped = 0
@@ -2689,7 +2763,11 @@ def _run_strategy_bt(data, triggers, hold, max_pos=BT_MAX_POSITIONS, fee=BT_FEE,
             continue
         b, s = i + 1, i + 1 + hold
         if s >= len(st['dates']):
-            end_dropped += 1
+            if drop_incomplete or b >= len(st['dates']):
+                end_dropped += 1
+                continue
+            plans.append({'code': code, 'trig_date': tdate, 'b': b, 's': None,
+                          'b_date': st['dates'][b], 's_date': None})
             continue
         plans.append({'code': code, 'trig_date': tdate, 'b': b, 's': s,
                       'b_date': st['dates'][b], 's_date': st['dates'][s]})
@@ -2757,7 +2835,8 @@ def _run_strategy_bt(data, triggers, hold, max_pos=BT_MAX_POSITIONS, fee=BT_FEE,
         fund_util.append(busy_v / total if total > 0 else 0.0)
     return {'equity': equity, 'trades': trades, 'rejected': rejected,
             'end_dropped': end_dropped, 'fund_util': fund_util,
-            'n_triggers': len(triggers), 'macro_blocked': macro_blocked}
+            'n_triggers': len(triggers), 'macro_blocked': macro_blocked,
+            'open_positions': sum(1 for x in slot_busy if x is not None)}
 
 
 def _perf_metrics(equity, dates, trades=None, fund_util=None):
@@ -3776,8 +3855,11 @@ def run_forward_step(log=print):
     (美股未收盘时其行情缺失由ffill补, 若照常入库则次日真实收盘到来必触发守卫告警)
     3) 已入库日期逐日校验NAV, 不一致记告警不改写 4) 新日期/新交易按唯一键追加
     5) 状态快照存 forward_meta.status
-    运行前提: 管道已更新行情/信号/宽表(直接调用请先跑 run_daily_pipeline)"""
-    data = _load_backtest_data()
+    运行前提: 管道已更新行情/信号/宽表(直接调用请先跑 run_daily_pipeline)
+    2026-09-07 模块10: 重放数据=活跃池实时∪快照注入; 触发按资格区间过滤;
+    B1 只由首批成员(首次join_eff<=FORWARD_START)构成 — 池扩容/离池零失配"""
+    data = _forward_replay_data()
+    membership = _forward_membership()
     fwd = {'stocks': data['stocks'],
            'calendar': [d for d in data['calendar'] if d >= FORWARD_START],
            'signals': data['signals'], 'index_series': data['index_series']}
@@ -3816,10 +3898,36 @@ def run_forward_step(log=print):
                      (json.dumps(_forward_protocol_json(), ensure_ascii=False, default=str),
                       datetime.now().strftime('%Y-%m-%d'), now))
 
+    # 模块10: 池构成协议(独立meta键, DELETE+INSERT 幂等 — 模块9问题日志#4同源)
+    conn.execute("DELETE FROM forward_meta WHERE meta_key='pool_protocol'")
+    conn.execute("INSERT INTO forward_meta(meta_key, result_json, run_date, generated_at) "
+                 "VALUES('pool_protocol',?,?,?)",
+                 (json.dumps({
+                     'membership_rule': ('信号(code,trade_date)计入前向 ⟺ 落在资格区间'
+                                         '[join_eff,leave_eff)内(forward_pool_events 追加式); '
+                                         '新股回填的历史信号不追溯, 前向样本自 join_eff 起积累'),
+                     'b1_rule': ('B1 仅由首批成员(首次join_eff<=FORWARD_START)构成, 后加入者'
+                                 '永不进入; 首批成员离池后其 B1 sleeve 由快照冻结在最后值'),
+                     'leave_rule': ('离池/停用生效前快照冻结(forward_stock_px/sig), '
+                                    '已关闭区间重放只用快照(防qfq重基准), 已入库 NAV 永不失配'),
+                     'adjudication_unchanged': ('裁决规则/门槛/策略参数/B2定义均不随池构成变化; '
+                                                '新增成员只增加触发样本来源'),
+                     'valuation_rule': ('前向NAV为盯市口径: 出场日未到的持仓按最新收盘计市值'
+                                        '(drop_incomplete=False), 净值含在持仓位; 完成交易在'
+                                        '出场日行情终局(≤完整性截断日)后补录 forward_trades'),
+                 }, ensure_ascii=False, default=str),
+                  datetime.now().strftime('%Y-%m-%d'), now))
+
     # B1/B2 前向基准(同窗口重算); 总收益取截断日口径(未终局日期不入统计)
-    b1_eq = _buy_hold_baseline(fwd, FORWARD_B1_ENTRY_REF)
+    # 模块10: B1 只由首批成员构成(excess_vs_B1 全窗口可比; 后加入者永不进入)
+    first_batch = {c for c, ivs in membership.items()
+                   if ivs and ivs[0][0] <= FORWARD_START and c in fwd['stocks']}
+    b1_data = {'stocks': {c: fwd['stocks'][c] for c in first_batch},
+               'calendar': fwd['calendar']}
+    b1_eq = _buy_hold_baseline(b1_data, FORWARD_B1_ENTRY_REF)
     b2_eq = _index_baseline(fwd)
-    b1_total = (b1_eq[len(cal_stock) - 1] / b1_eq[0] - 1) if len(cal_stock) >= 2 else None
+    b1_total = (b1_eq[len(cal_stock) - 1] / b1_eq[0] - 1
+                if (len(cal_stock) >= 2 and b1_eq) else None)
     b2_total = (b2_eq[len(cal_index) - 1] / b2_eq[0] - 1) if len(cal_index) >= 2 else None
 
     # 守卫基准: 已入库 (strategy_id, trade_date) -> nav
@@ -3861,12 +3969,15 @@ def run_forward_step(log=print):
 
     status_strategies = {}
     for sid, spec in BT_STRATEGIES.items():
+        # 模块10: 触发按资格区间过滤(离池区间/入池前历史信号不计入前向)
         triggers = [(c, d) for (c, d) in _collect_triggers(fwd, spec)
-                    if d >= FORWARD_START]
+                    if d >= FORWARD_START and _member_on(membership, c, d)]
         # 模块9: overlay 变体用预载封锁日集(台账只追加不改写→重放确定性)
         blocked = overlay_blocked if spec.get('overlay') else None
+        # 前向口径(2026-09-07 修复): 出场日未到的持仓盯市不丢弃 — 空仓1.0是引擎缺陷产物
         res = _run_strategy_bt(fwd, triggers, spec['hold'],
-                               BT_MAX_POSITIONS, FORWARD_FEE, blocked_days=blocked)
+                               BT_MAX_POSITIONS, FORWARD_FEE, blocked_days=blocked,
+                               drop_incomplete=False)
         metrics = _perf_metrics(res['equity'][:len(cal_stock)], cal_stock,
                                 res['trades'], res['fund_util'])
         for t in res['trades']:
@@ -3895,6 +4006,7 @@ def run_forward_step(log=print):
             'n_triggers': res['n_triggers'], 'n_trades': len(capped_trades),
             'rejected': res['rejected'], 'end_dropped': res['end_dropped'],
             'macro_blocked': res.get('macro_blocked', 0),
+            'open_positions': res.get('open_positions', 0),
             'total_return': total, 'sharpe': metrics.get('sharpe'),
             'max_drawdown': metrics.get('max_drawdown'), 'win_rate': win_rate,
             'excess_vs_b1': (total - b1_total) if (total is not None and b1_total is not None) else None,
@@ -3994,7 +4106,8 @@ def get_data_freshness():
 
 
 def run_daily_pipeline(log=print):
-    """模块7每日管道(收盘后运行): 行情→指数→指标→信号扫描→宽表→前向记录→新鲜度
+    """模块7每日管道(收盘后运行): 孤儿股补课→行情→指数→指标→信号扫描→宽表→
+    宏观→封锁日台账→前向记录→新鲜度(模块10起 9 步)
     各步独立 try/except(打印异常不静默), 单步失败不阻断后续; 报告存 forward_meta"""
     report = {'steps': {},
               'generated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
@@ -4008,6 +4121,8 @@ def run_daily_pipeline(log=print):
             report['steps'][name] = {'error': f"{type(e).__name__}: {e}"}
 
     log("[pipeline] 开始每日管道...")
+    # 模块10: 首步孤儿股补课(入池未引导/数据残缺 → 自动执行引导链, 同管道内补齐)
+    step('onboard_check', lambda: _pipeline_onboard_check(log=log))
     step('quotes', lambda: batch_collect_daily())
     step('benchmark', lambda: batch_collect_benchmark())
     step('indicators', lambda: batch_generate_indicators())
@@ -4868,3 +4983,337 @@ def load_fdr_view():
     conn.close()
     return {'results': res, 'fdr_meta': fdr_meta, 'overlay_meta': overlay_meta,
             'ledger': ledger}
+
+
+# ============================================================
+# 模块 10: 股票池动态扩容与数据引导 (2026-09-07)
+# 入池即引导(onboard) + 前向资格区间(membership timeline) +
+# 离池/停用快照冻结(已入库前向净值永不失配)
+# 预注册规则见 模块10开发计划.md 二(2026-09-07 看结果前冻结)
+# ============================================================
+
+def _m10_event(code, event, source):
+    """追加一条池构成事件(join/leave), eff_date=今天"""
+    conn = get_db()
+    row = conn.execute("SELECT market, name FROM stock_pool WHERE code=?",
+                       (code,)).fetchone()
+    conn.execute(
+        "INSERT INTO forward_pool_events(code, market, name, event, "
+        "eff_date, source, run_ts) VALUES(?,?,?,?,?,?,?)",
+        (code, row['market'] if row else None, row['name'] if row else None,
+         event, datetime.now().strftime('%Y-%m-%d'), source,
+         datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
+    conn.commit()
+    conn.close()
+
+
+def _forward_membership():
+    """事件表 → {code: [(join_eff, leave_eff|None), ...]} 资格区间升序
+    活跃池中无事件的股票 → 隐式 (FORWARD_START, None) 兜底(兼容未迁移库)"""
+    conn = get_db()
+    events = [dict(r) for r in conn.execute(
+        "SELECT code, event, eff_date FROM forward_pool_events "
+        "ORDER BY code, eff_date, id")]
+    conn.close()
+    out = {}
+    for e in events:
+        ivs = out.setdefault(e['code'], [])
+        if e['event'] == 'join':
+            ivs.append([e['eff_date'], None])
+        elif ivs and ivs[-1][1] is None:
+            ivs[-1][1] = e['eff_date']
+        else:
+            # leave 无对应 join(未迁移库的极端序列): 隐式 join 自 FORWARD_START
+            ivs.append([FORWARD_START, e['eff_date']])
+    for s in get_stock_pool(active_only=True):
+        if s['code'] not in out:
+            out[s['code']] = [[FORWARD_START, None]]
+    return {c: [tuple(iv) for iv in ivs] for c, ivs in out.items()}
+
+
+def _member_on(membership, code, d):
+    """股票 code 在交易日 d 是否处于资格区间 [join, leave) 内"""
+    for j, l in membership.get(code, ()):
+        if j <= d and (l is None or d < l):
+            return True
+    return False
+
+
+def _stock_open_membership(code):
+    """该股当前是否存在开放资格区间(活跃池无事件股票的隐式区间也算开放)"""
+    return any(l is None for (_, l) in _forward_membership().get(code, ()))
+
+
+def _forward_replay_data():
+    """模块10 前向重放数据集: 活跃池实时 ∪ 快照注入, 与 _load_backtest_data 同构
+    已关闭区间(有leave事件)只用快照(防qfq重基准回写历史导致已入库NAV失配);
+    开放区间(当前成员)只用实时表; 再入池股按区间逐日裁决(关闭区间日覆盖为快照值)"""
+    data = _load_backtest_data()
+    membership = _forward_membership()
+    conn = get_db()
+    snap_codes = [r[0] for r in conn.execute(
+        "SELECT DISTINCT code FROM forward_stock_px ORDER BY code")]
+    for code in snap_codes:
+        closed = [(j, l) for (j, l) in membership.get(code, ()) if l is not None]
+        if not closed:
+            continue  # 无关闭区间: 实时表即真相
+
+        def in_closed(d, closed=closed):
+            return any(j <= d < l for (j, l) in closed)
+
+        px = conn.execute(
+            "SELECT trade_date, open, close FROM forward_stock_px "
+            "WHERE code=? ORDER BY trade_date", (code,)).fetchall()
+        if code not in data['stocks']:
+            # 离池/停用股: 整个前向窗口为关闭区间, 快照即全部数据
+            mkt = conn.execute(
+                "SELECT market FROM forward_pool_events WHERE code=? "
+                "ORDER BY id LIMIT 1", (code,)).fetchone()
+            st = {'market': mkt[0] if mkt else '', 'dates': [],
+                  'opens': [], 'closes': [], 'date_idx': {}}
+            for r in px:
+                if r['open'] and r['close'] and in_closed(r['trade_date']):
+                    st['date_idx'][r['trade_date']] = len(st['dates'])
+                    st['dates'].append(r['trade_date'])
+                    st['opens'].append(r['open'])
+                    st['closes'].append(r['close'])
+            if st['dates']:
+                data['stocks'][code] = st
+        else:
+            # 再入池股: 关闭区间日以快照值覆盖实时值(其余日用实时)
+            live = data['stocks'][code]
+            px_map = {r['trade_date']: (r['open'], r['close']) for r in px}
+            for i, d in enumerate(live['dates']):
+                if d in px_map and in_closed(d):
+                    live['opens'][i], live['closes'][i] = px_map[d]
+        # 信号: 关闭区间日只认快照(移除实时, 防 qfq 重基准后检出差异)
+        data['signals'] = {t for t in data['signals']
+                           if not (t[0] == code and in_closed(t[1]))}
+        for r in conn.execute(
+                "SELECT trade_date, signal_type, signal_subtype FROM "
+                "forward_stock_sig WHERE code=?", (code,)):
+            if in_closed(r['trade_date']):
+                data['signals'].add(
+                    (code, r['trade_date'], r['signal_type'], r['signal_subtype']))
+    conn.close()
+    data['calendar'] = sorted(
+        set(d for s in data['stocks'].values() for d in s['dates']))
+    return data
+
+
+def _snapshot_forward_stock(code):
+    """离池/停用前冻结: 该股前向窗口价格与信号键快照(INSERT OR REPLACE 幂等)
+    保证级联删除后前向重放仍能逐日复现已入库净值(追加守卫零失配)"""
+    conn = get_db()
+    px = conn.execute(
+        "SELECT trade_date, open, close FROM daily_feature_base "
+        "WHERE code=? AND trade_date>=?", (code, FORWARD_START)).fetchall()
+    for r in px:
+        conn.execute(
+            "INSERT OR REPLACE INTO forward_stock_px(code, trade_date, open, close) "
+            "VALUES(?,?,?,?)", (code, r['trade_date'], r['open'], r['close']))
+    sig = conn.execute(
+        "SELECT DISTINCT trade_date, signal_type, signal_subtype "
+        "FROM passive_signals WHERE code=? AND trade_date>=?",
+        (code, FORWARD_START)).fetchall()
+    for r in sig:
+        conn.execute(
+            "INSERT OR REPLACE INTO forward_stock_sig"
+            "(code, trade_date, signal_type, signal_subtype) VALUES(?,?,?,?)",
+            (code, r['trade_date'], r['signal_type'], r['signal_subtype']))
+    conn.commit()
+    conn.close()
+    return {'px_rows': len(px), 'sig_rows': len(sig)}
+
+
+def _replay_signals_for(code, market, name, log=None):
+    """单股信号回放(模块10 从 replay_passive_signals 重构抽出, 行为不变):
+    完整行情重算指标 → 仅记录 ≥REPLAY_START 的信号(source='replay', 幂等键复用)"""
+    df = get_daily_quotes(code, days=4000)
+    if df is None or len(df) < 30:
+        return 0
+    df = calc_all_indicators(df)
+    df = df[df['date'] >= pd.Timestamp(REPLAY_START)].reset_index(drop=True)
+    sigs = detect_signals(df, code, market, name, source='replay')
+    if log:
+        log(f"  [replay] {code}: 检出 {len(sigs)} 条(REPLAY_START={REPLAY_START} 起)")
+    return len(sigs)
+
+
+def onboard_pool_stock(code, log=print, recalc_modules=False):
+    """模块10 入池引导链: 行情回填→基准指数→指标→信号回放→宽表→join事件兜底
+    逐步独立 try/except(失败报告不中断); 全程幂等可重复
+    recalc_modules=True 追加池结构变化收尾三件套(模块3三口径重算+回测新批次)"""
+    code = code.strip().upper()
+    s = get_stock_from_pool(code)
+    if not s:
+        return {'ok': False, 'error': f'{code} 不在股票池'}
+    market = s.get('market', 'A股')
+    rep = {'ok': True, 'code': code, 'market': market, 'steps': {}}
+
+    def step(name, fn):
+        try:
+            rep['steps'][name] = fn()
+            log(f"  [onboard] {code} {name}: OK")
+        except Exception as e:
+            print(f"[onboard:{code}:{name}] {type(e).__name__}: {e}")
+            rep['steps'][name] = {'error': f"{type(e).__name__}: {e}"}
+            rep['ok'] = False
+
+    step('quotes_backfill', lambda: _onboard_backfill_quotes(code, market))
+    step('benchmark', lambda: _onboard_ensure_benchmark(market))
+    step('indicators', lambda: generate_indicators(code))
+    step('signal_replay', lambda: _replay_signals_for(code, market, s.get('name', '')))
+    step('wide_table', lambda: generate_wide_table(code, days=3000))
+    step('join_event', lambda: _onboard_ensure_join(code, s))
+    if recalc_modules:
+        step('module3_recalc', lambda: run_module3_analysis())
+        step('backtests_new_batch', lambda: run_d2_backtests())
+    n_q = rep['steps'].get('quotes_backfill')
+    if isinstance(n_q, int) and n_q == 0:
+        rep['ok'] = False
+        rep['error'] = (f'{code} 行情采集返回 0 行 — 检查代码/市场是否正确'
+                        f'(港股为5位数字如 00700, 美股为交易所代码如 AAPL)')
+    return rep
+
+
+def _onboard_backfill_quotes(code, market):
+    """行情全量回填(QUOTE_BACKFILL_START 起, 与模块8同口径复用采集函数)"""
+    days = ((datetime.now() - datetime.strptime(QUOTE_BACKFILL_START, '%Y-%m-%d')).days + 5)
+    if market == 'A股':
+        n = collect_a_share_daily(code, days)
+    elif market == '港股':
+        n = collect_hk_daily(code, days)
+    else:
+        n = collect_us_daily(code, days)
+    return n or 0
+
+
+def _onboard_ensure_benchmark(market):
+    """该市场基准指数缺失则采集(前向B2与新鲜度日历依赖)"""
+    conn = get_db()
+    n = conn.execute("SELECT COUNT(*) FROM benchmark_index WHERE market=?",
+                     (market,)).fetchone()[0]
+    conn.close()
+    if n > 0:
+        return {'rows': n, 'collected': False}
+    collect_benchmark_index(market)
+    conn = get_db()
+    n2 = conn.execute("SELECT COUNT(*) FROM benchmark_index WHERE market=?",
+                      (market,)).fetchone()[0]
+    conn.close()
+    return {'rows': n2, 'collected': True}
+
+
+def _onboard_ensure_join(code, s):
+    """join 事件兜底: 该股无任何 join 事件时补写(eff=added_at 或今天)"""
+    conn = get_db()
+    has = conn.execute("SELECT 1 FROM forward_pool_events "
+                       "WHERE code=? AND event='join' LIMIT 1", (code,)).fetchone()
+    conn.close()
+    if has:
+        return {'written': False}
+    eff = max(FORWARD_START, (s.get('added_at') or '')[:10] or
+              datetime.now().strftime('%Y-%m-%d'))
+    _m10_event(code, 'join', 'onboard')
+    conn = get_db()
+    conn.execute("UPDATE forward_pool_events SET eff_date=? "
+                 "WHERE code=? AND event='join' AND source='onboard'", (eff, code))
+    conn.commit()
+    conn.close()
+    return {'written': True, 'eff_date': eff}
+
+
+def get_pool_onboard_status():
+    """池内每股数据引导状态(驱动 UI 与管道 onboard_check):
+    needs_onboard = 无行情 或 无宽表 或 无指标 或 (有行情但零信号)"""
+    conn = get_db()
+    events = conn.execute(
+        "SELECT code, MIN(eff_date) FROM forward_pool_events "
+        "WHERE event='join' GROUP BY code").fetchall()
+    first_join = {r[0]: r[1] for r in events}
+    idx_dates = {}
+    for m in ['A股', '港股', '美股']:
+        idx_dates[m] = [r[0] for r in conn.execute(
+            "SELECT trade_date FROM benchmark_index WHERE market=? "
+            "ORDER BY trade_date", (m,))]
+    out = []
+    for s in get_stock_pool(active_only=True):
+        code = s['code']
+        q = conn.execute(
+            "SELECT COUNT(*), MAX(trade_date) FROM daily_quotes WHERE code=?",
+            (code,)).fetchone()
+        n_sig = conn.execute(
+            "SELECT COUNT(*) FROM passive_signals WHERE code=?", (code,)).fetchone()[0]
+        n_ind = conn.execute(
+            "SELECT COUNT(*) FROM daily_indicators WHERE code=?", (code,)).fetchone()[0]
+        n_wide = conn.execute(
+            "SELECT COUNT(*) FROM daily_feature_base WHERE code=?",
+            (code,)).fetchone()[0]
+        ql = q[1]
+        lag = (sum(1 for d in idx_dates.get(s['market'], []) if d > ql)
+               if ql else len(idx_dates.get(s['market'], [])))
+        needs = (q[0] == 0 or n_wide == 0 or n_ind == 0
+                 or (q[0] > 0 and n_sig == 0))
+        out.append({
+            'code': code, 'name': s.get('name', ''), 'market': s['market'],
+            'quotes': q[0], 'quote_latest': ql, 'lag_trading_days': lag,
+            'signals': n_sig, 'indicators': n_ind, 'wide': n_wide,
+            'forward_join': first_join.get(code, FORWARD_START),
+            'needs_onboard': bool(needs),
+            'ready': not needs,
+        })
+    conn.close()
+    return out
+
+
+def _pipeline_onboard_check(log=print):
+    """模块10 管道首步: 活跃池孤儿股自动补课
+    (无行情/无宽表/无指标/有行情但零信号 → 自动执行入池引导链)"""
+    rep = {'checked': 0, 'onboarded': [], 'results': {}}
+    for s in get_pool_onboard_status():
+        if not s['needs_onboard']:
+            continue
+        rep['checked'] += 1
+        log(f"  [pipeline] {s['code']} 数据未引导(行情{s['quotes']}/宽表{s['wide']}/"
+            f"指标{s['indicators']}/信号{s['signals']}), 自动执行引导链")
+        r = onboard_pool_stock(s['code'], log=log)
+        rep['onboarded'].append(s['code'])
+        rep['results'][s['code']] = {'ok': r.get('ok'),
+                                     'error': r.get('error')}
+    if rep['checked'] == 0:
+        rep['note'] = '全部股票数据就绪, 无需补课'
+    return rep
+
+
+def get_pool_membership_view():
+    """模块10 池构成视图(Tab9 ③c): 事件时间线/开放资格成员/B1首批成员/池协议
+    读路径无DDL(模块9问题日志#1): forward_meta 用 sqlite_master 探测"""
+    conn = get_db()
+    events = [dict(r) for r in conn.execute(
+        "SELECT code, market, name, event, eff_date, source, run_ts "
+        "FROM forward_pool_events ORDER BY eff_date, id")]
+    proto_row = None
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
+                    "AND name='forward_meta'").fetchone():
+        proto_row = conn.execute(
+            "SELECT result_json FROM forward_meta WHERE meta_key='pool_protocol' "
+            "ORDER BY id DESC LIMIT 1").fetchone()
+    conn.close()
+    membership = _forward_membership()
+    active = {s['code'] for s in get_stock_pool(active_only=True)}
+    members = [{'code': c, 'join_eff': j, 'in_pool': c in active}
+               for c, ivs in sorted(membership.items())
+               for (j, l) in ivs if l is None]
+    first_batch = sorted(c for c, ivs in membership.items()
+                         if ivs and ivs[0][0] <= FORWARD_START)
+    return {
+        'events': events,
+        'members': members,
+        'first_batch': first_batch,
+        'forward_start': FORWARD_START,
+        'pool_protocol': json.loads(proto_row[0]) if proto_row else None,
+    }
+
+
+_m10_migrate_events()

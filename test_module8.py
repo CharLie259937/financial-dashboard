@@ -33,6 +33,10 @@ print("=" * 62)
 pool = qd.get_stock_pool(active_only=True)
 codes = [s['code'] for s in pool]
 conn = qd.get_db()
+# 模块10起入池的新股(join_eff>2026-09-01): 数据源覆盖深度由 onboard 引导链保障
+# (如00100自2026-01-09上市, 源端无更早数据), 不适用模块8的2020回填目标
+join_eff = {r[0]: r[1] for r in conn.execute(
+    "SELECT code, MIN(eff_date) FROM forward_pool_events WHERE event='join' GROUP BY code")}
 for s in pool:
     r = conn.execute(
         "SELECT COUNT(*), MIN(trade_date), MAX(trade_date) FROM daily_quotes WHERE code=?",
@@ -40,8 +44,12 @@ for s in pool:
     dup = conn.execute(
         "SELECT COUNT(*) FROM (SELECT code, trade_date FROM daily_quotes "
         "WHERE code=? GROUP BY code, trade_date HAVING COUNT(*)>1)", (s['code'],)).fetchone()[0]
-    check(f"{s['code']} 行情自 {r[1]} 起 (回填目标2020-01)",
-          r[1] is not None and r[1] <= '2021-01-10', f"{r[0]}行, {r[1]}~{r[2]}")
+    if join_eff.get(s['code'], '2020-01-01') > '2026-09-01':
+        check(f"{s['code']} 新股(模块10入池)行情 {r[0]} 行 自 {r[1]} (源端覆盖, 引导链保障)",
+              r[1] is not None and r[0] >= 100, f"{r[0]}行, {r[1]}~{r[2]}")
+    else:
+        check(f"{s['code']} 行情自 {r[1]} 起 (回填目标2020-01)",
+              r[1] is not None and r[1] <= '2021-01-10', f"{r[0]}行, {r[1]}~{r[2]}")
     check(f"{s['code']} 无重复(code,trade_date)", dup == 0, f"重复{dup}")
 conn.close()
 

@@ -1,7 +1,10 @@
 # -*- coding: utf-8 -*-
 """D3 验证: 模拟 Tab 8 数据层与图表构建(不依赖 Streamlit 运行时)
 对 Desktop 库执行 Tab 8 同款查询 + 净值/回撤/费率图数据构建 + 结论计算
-期望值基准: 2026-09-04 模块8扩窗批次(最新批次, 2018-06-18起) + 多批次并存模式"""
+期望值基准: 2026-09-07 模块10批次(最新批次, 4股池含00100, full 2018-06-18~2026-09-07)
++ 多批次并存模式(00100 oos内-53%暴跌 → B1/各策略 oos 数值与模块8批次差异大)
+注意: test_module5 每次运行会重生成当日批次(run_d2_backtests 同日覆盖), 行情刷新后
+B1(恒满仓)端点移动而空仓策略不动 → 超额期望值以"数据刷新后重生成"的批次为准"""
 import sys
 import json
 import sqlite3
@@ -100,7 +103,7 @@ def _bt_curve(sid, seg):
     return [p[0] for p in pts], [p[1] for p in pts]
 
 check(f"策略集 {n_strat} 个 {bt_strats}",
-      bt_strats == ['S1a', 'S1b', 'S1c', 'S1d', 'S1e', 'S2'])
+      bt_strats == ['S1a', 'S1aM', 'S1b', 'S1c', 'S1d', 'S1e', 'S2', 'S2M'])
 check(f"fee0 run 索引 {n_strat + 2} 组({n_strat}策略+双基准)×2段",
       len(run_meta) == (n_strat + 2) * 2, f"实际 {len(run_meta)}")
 
@@ -157,10 +160,10 @@ check(f"总表 {n_strat + 2} 行 (实际 {len(cmp_df)})", len(cmp_df) == n_strat
 check("数值列 dtype 均为数值型 int64/float64 (无 object 混型, Arrow 安全)",
       all(str(cmp_df[c].dtype) in ('float64', 'int64')
           for c in cmp_df.columns if c != '对象'))
-s1a = cmp_df[cmp_df['对象'].str.startswith('S1a')].iloc[0]
-check(f"S1a OOS收益 10.23 (实际 {s1a['OOS收益%']})", abs(s1a['OOS收益%'] - 10.23) < 0.01)
-check(f"S1a OOS超额vsB1 13.51pp (实际 {s1a['OOS超额vsB1(pp)']})",
-      abs(s1a['OOS超额vsB1(pp)'] - 13.51) < 0.01)
+s1a = cmp_df[cmp_df['对象'].str.startswith('S1a ')].iloc[0]
+check(f"S1a OOS收益 -10.73 (实际 {s1a['OOS收益%']})", abs(s1a['OOS收益%'] + 10.73) < 0.01)
+check(f"S1a OOS超额vsB1 7.64pp (实际 {s1a['OOS超额vsB1(pp)']})",
+      abs(s1a['OOS超额vsB1(pp)'] - 7.64) < 0.01)
 
 print("[6] 费率敏感性图构建")
 fig_fee = make_subplots(rows=1, cols=2, subplot_titles=("full 段", "oos 段"))
@@ -180,8 +183,8 @@ for col, seg in enumerate(['full', 'oos'], start=1):
 fig_fee.update_layout(barmode='group', template="plotly_white", height=360)
 check(f"费率图 trace 数 6 (实际 {trace_cnt})", trace_cnt == 6)
 oos_s1a_fee3 = _bt_run('S1a', 'oos', 0.003)['total_return']
-check(f"S1a oos fee0.3% = +9.05% (实际 {oos_s1a_fee3*100:.2f}%)",
-      abs(oos_s1a_fee3 - 0.0905) < 0.001)
+check(f"S1a oos fee0.3% = -13.53% (实际 {oos_s1a_fee3*100:.2f}%)",
+      abs(oos_s1a_fee3 + 0.1353) < 0.001)
 
 print("[7] 交易明细过滤(oos×fee0×S1a)")
 trs = [t for t in tr_rows if t['strategy_id'] == 'S1a' and t['segment'] == 'oos'
@@ -208,11 +211,12 @@ conclusions = []
 oos_strats = [(_bt_run(sid, 'oos'), sid) for sid in bt_strats]
 oos_valid = [(r, sid) for r, sid in oos_strats if r and r['excess_vs_bh'] is not None]
 best_r, best_sid = max(oos_valid, key=lambda x: x[0]['excess_vs_bh'])
-check(f"样本外最强 = S1a (扩窗后反超S2, 实际 {best_sid})", best_sid == 'S1a')
+check(f"样本外最强 = S1e (4股池00100样本推高超额, 实际 {best_sid})", best_sid == 'S1e')
 oos_fee3 = [(_bt_run(sid, 'oos', 0.003), sid) for sid in bt_strats]
 fee_fragile = [sid for r, sid in oos_fee3
                if r and r['total_return'] is not None and r['total_return'] <= 0]
-check(f"费率脆弱名单 = [S1d] (实际 {fee_fragile})", fee_fragile == ['S1d'])
+check(f"费率脆弱名单 = 6策略(仅S1e/S1aM费后为正, 实际 {fee_fragile})",
+      fee_fragile == ['S1a', 'S1b', 'S1c', 'S1d', 'S2', 'S2M'])
 zero_trig = [sid for r, sid in oos_strats if not r or not r['n_triggers']]
 check(f"S3删除后全部策略 oos 段均有触发, 「无法样本外验证」结论不再触发 (实际零触发: {zero_trig})",
       not zero_trig)
@@ -220,8 +224,9 @@ s2_oos = _bt_run('S2', 'oos')
 check(f"S2 oos 满仓拒率>30% 触发容量约束结论 (实际 {s2_oos['n_rejected']}/{s2_oos['n_triggers']})",
       s2_oos['n_rejected'] / s2_oos['n_triggers'] > 0.3)
 s1e_oos = _bt_run('S1e', 'oos')
-check(f"S1e oos 超额 {s1e_oos['excess_vs_bh']*100:+.2f}pp < +14.9pp → 维持观察",
-      s1e_oos['excess_vs_bh'] < 0.149)
+check(f"S1e oos 超额 +31.30pp (00100超卖样本推高; 冻结协议: 回测不改观察状态, 裁决=前向)",
+      abs(s1e_oos['excess_vs_bh'] - 0.313) < 0.005
+      and quant_data.BT_STRATEGIES['S1e'].get('observation') is True)
 check("协议字段齐备", all(k in proto for k in
       ['knowledge_cutoff', 'freeze_date', 'honesty_note', 'freeze_rule']))
 

@@ -761,7 +761,7 @@ elif page == "量化分析":
     with quant_tab1:
         st.subheader("股票池管理")
 
-        # 添加股票到池
+        # 添加股票到池(模块10: 入池即引导 — 行情回填→指标→信号回放→宽表)
         qp1, qp2, qp3, qp4 = st.columns([2, 1, 2, 1])
         with qp1:
             new_code = st.text_input("股票代码", placeholder="如 600000 / AAPL / 00700", key="qp_code")
@@ -772,32 +772,87 @@ elif page == "量化分析":
         with qp4:
             st.write("")
             st.write("")
-            if st.button("加入股票池", type="primary", key="qp_add"):
+            if st.button("加入并引导", type="primary", key="qp_add"):
                 if new_code.strip():
-                    quant_data.add_to_pool(new_code, new_market, "", new_sector)
-                    st.success(f"已加入: {new_code.strip().upper()} ({new_market})")
-                    st.rerun()
+                    added = quant_data.add_to_pool(new_code, new_market, "", new_sector)
+                    with st.status(f"{added} 入池引导中...", expanded=True) as ob_status:
+                        def _ob_log(msg):
+                            st.write(str(msg))
+                        rep = quant_data.onboard_pool_stock(added, log=_ob_log)
+                        if rep['ok']:
+                            st.session_state['pool_added_msg'] = (
+                                f"✅ {added} ({new_market}) 入池并完成数据引导 — "
+                                "回填的历史信号不追溯计入前向，前向样本自入池日起积累")
+                            ob_status.update(label=f"✅ {added} 引导完成", state="complete")
+                            st.rerun()
+                        else:
+                            _errs = [f"{k}: {v['error']}" for k, v in rep['steps'].items()
+                                     if isinstance(v, dict) and 'error' in v]
+                            ob_status.update(
+                                label=(f"⚠️ {added} 引导未完成（{'; '.join(_errs) or rep.get('error', '')}"
+                                       "）— 可修正后用下方「引导/补数据」重试"),
+                                state="error", expanded=True)
 
         st.divider()
 
-        # 股票池列表
+        # 股票池列表(模块10: 含数据覆盖与前向资格)
         pool = quant_data.get_stock_pool(active_only=False)
         if not pool:
             st.info("股票池为空，请先添加股票")
         else:
-            st.write(f"**股票池 ({len(pool)} 只)**")
+            if 'pool_added_msg' in st.session_state:
+                st.success(st.session_state.pop('pool_added_msg'))
+            st.write(f"**股票池 ({len(pool)} 只)** — 数据覆盖 · 前向资格")
+            _ob_map = {s['code']: s for s in quant_data.get_pool_onboard_status()}
             pool_data = []
             for s in pool:
+                ob = _ob_map.get(s["code"])
                 pool_data.append({
                     "代码": s["code"],
                     "市场": s["market"],
                     "名称": s.get("name", "") or "—",
                     "板块": s.get("sector", "") or "—",
                     "状态": "活跃" if s.get("is_active") else "暂停",
+                    "行情最新": (ob or {}).get("quote_latest") or "—",
+                    "覆盖(行/指标/信号/宽表)": (f"{ob['quotes']}/{ob['indicators']}/"
+                                               f"{ob['signals']}/{ob['wide']}" if ob else "0/0/0/0"),
+                    "前向资格日": (ob or {}).get("forward_join", "—"),
+                    "数据状态": ("✅ 就绪" if ob and ob["ready"] else "⚠️ 需引导"),
                     "涨幅阈值": f"±{s.get('price_threshold', 5.0)}%",
                     "量能倍数": f"{s.get('volume_ratio', 2.0)}x",
                 })
             st.dataframe(pd.DataFrame(pool_data), use_container_width=True, hide_index=True)
+
+            # 模块10: 单股引导 / 池结构变化收尾
+            ga1, ga2 = st.columns(2)
+            with ga1:
+                ob_code = st.selectbox("引导/补数据", [s["code"] for s in pool], key="qp_ob_code")
+                if st.button("🚀 引导/补数据（行情→指标→信号回放→宽表）", key="qp_ob_btn"):
+                    with st.status(f"{ob_code} 引导链运行中...", expanded=True) as ob2:
+                        def _ob2_log(msg):
+                            st.write(str(msg))
+                        rep = quant_data.onboard_pool_stock(ob_code, log=_ob2_log)
+                        if rep['ok']:
+                            st.session_state['pool_added_msg'] = f"✅ {ob_code} 数据引导完成"
+                            ob2.update(label=f"✅ {ob_code} 引导完成", state="complete")
+                            st.rerun()
+                        else:
+                            _errs = [f"{k}: {v['error']}" for k, v in rep['steps'].items()
+                                     if isinstance(v, dict) and 'error' in v]
+                            ob2.update(
+                                label=f"⚠️ {ob_code} 引导未完成（{'; '.join(_errs) or rep.get('error', '')}）",
+                                state="error", expanded=True)
+            with ga2:
+                st.caption("池结构变化（增/删/停用股票）后收尾：模块3 三口径重算 + 回测新批次"
+                           "（冻结参数，分钟级）")
+                if st.button("📊 池结构变化收尾", key="qp_recalc"):
+                    with st.status("池结构变化收尾...", expanded=True) as rc_status:
+                        st.write("① 模块3 三口径统计重算...")
+                        quant_data.run_module3_analysis()
+                        st.write("② 回测新批次（冻结参数全量重跑）...")
+                        quant_data.run_d2_backtests()
+                        rc_status.update(label="✅ 收尾完成（模块3 重算 + 回测新批次已入库）",
+                                         state="complete")
 
             # 删除/切换活跃
             dc1, dc2 = st.columns([1, 1])
@@ -805,15 +860,20 @@ elif page == "量化分析":
                 if 'pool_removed_msg' in st.session_state:
                     st.success(st.session_state.pop('pool_removed_msg'))
                 del_code = st.selectbox("选择移除的股票", [s["code"] for s in pool], key="qp_del")
-                st.caption("移除会级联删除该股全部数据(行情/信号/事件/因子/宽表)；仅想暂停分析请用右侧「切换」停用")
+                st.caption("移除会级联删除该股全部数据；前向窗口数据已快照冻结（已入库净值不失配）；"
+                           "若该股有前向在持仓位，建议改用右侧「切换」停用")
                 if st.button("移除(含数据)", key="qp_remove"):
                     removed = quant_data.remove_from_pool(del_code)
+                    _snap = removed.pop('forward_snapshot', {}) or {}
                     st.session_state['pool_removed_msg'] = (
                         f"已移除 {del_code} 并清理数据: " +
-                        ", ".join(f"{t} {n}行" for t, n in removed.items()))
+                        ", ".join(f"{t} {n}行" for t, n in removed.items()) +
+                        f"；前向快照 px {_snap.get('px_rows', 0)} 行 / 信号 "
+                        f"{_snap.get('sig_rows', 0)} 条（已入库前向净值仍可复现）")
                     st.rerun()
             with dc2:
                 toggle_code = st.selectbox("切换活跃状态", [s["code"] for s in pool], key="qp_toggle")
+                st.caption("停用=前向快照+数据保留（不进分析）；再激活=资格从当天重新起算")
                 if st.button("切换", key="qp_toggle_btn"):
                     s = next(x for x in pool if x["code"] == toggle_code)
                     quant_data.set_pool_active(toggle_code, not s.get("is_active"))
@@ -1095,7 +1155,7 @@ elif page == "量化分析":
                     try:
                         rep = quant_data.run_m8_backfill_chain(log=_m8_log)
                         m8_status.update(
-                            label=(f"✅ 回填链完成：行情 3 股 · 回放新增 "
+                            label=(f"✅ 回填链完成：行情 {len(quant_data.get_stock_pool())} 股 · 回放新增 "
                                    f"{rep['replay']['new_inserted']} 条信号"),
                             state="complete", expanded=False)
                         st.rerun()
@@ -3144,8 +3204,9 @@ elif page == "量化分析":
             "追加式入库 · 裁决规则预注册 · 净值从 1 重起，与回测 oos 段严格分离")
 
         # ---------- ① 每日管道 ----------
-        st.markdown("**① 每日管道**（收盘后运行一次：行情 → 指数 → 指标 → 信号扫描 → 宽表 → "
-                    "宏观日历重采(近3天) → 封锁日台账追加(守卫=完整性截断日) → 前向记录 → 新鲜度）")
+        st.markdown("**① 每日管道**（收盘后运行一次 · 9 步：孤儿股补课 → 行情 → 指数 → 指标 → "
+                    "信号扫描 → 宽表 → 宏观日历重采(近3天) → 封锁日台账追加(守卫=完整性截断日) → "
+                    "前向记录 → 新鲜度）")
         pc1, pc2 = st.columns([1, 2])
         with pc1:
             if st.button("▶️ 运行每日管道", type="primary", key="m7_pipe_run"):
@@ -3244,6 +3305,43 @@ elif page == "量化分析":
                        "其余继续观察 · 各需完成 ≥20 笔交易后裁决 · 台账追加式保证重放确定性")
         except Exception as e:
             st.error(f"Overlay 裁决面板读取失败: {e}")
+
+        # ---------- ③c 池构成与前向资格 (模块10) ----------
+        st.markdown("**③c 池构成与前向资格**（模块10：入池即引导 · 资格区间过滤 · 离池快照冻结；"
+                    "规则预注册于 forward_meta.pool_protocol）")
+        try:
+            _mv = quant_data.get_pool_membership_view()
+            _fb = set(_mv['first_batch'])
+            _mem_rows = [{
+                "代码": m['code'],
+                "首次资格日": m['join_eff'],
+                "B1 首批成员": "✅" if m['code'] in _fb else "—",
+                "状态": "在池（开放区间）" if m['in_pool'] else "已离池（区间关闭，快照冻结）",
+            } for m in _mv['members']]
+            if _mem_rows:
+                st.dataframe(pd.DataFrame(_mem_rows), use_container_width=True, hide_index=True)
+            else:
+                st.info("暂无开放资格区间的股票")
+            _ev_rows = [{
+                "代码": e['code'], "市场": e['market'] or "—",
+                "事件": "入池/再激活" if e['event'] == 'join' else "离池/停用",
+                "生效日": e['eff_date'], "来源": e['source'] or "—",
+                "记录时间": e['run_ts'] or "—",
+            } for e in _mv['events']]
+            with st.expander(f"池构成事件时间线（{len(_ev_rows)} 条，追加式永不改写）", expanded=False):
+                if _ev_rows:
+                    st.dataframe(pd.DataFrame(_ev_rows), use_container_width=True, hide_index=True)
+                else:
+                    st.info("暂无池构成事件")
+            if _mv.get('pool_protocol'):
+                with st.expander("池构成协议（预注册，冻结）", expanded=False):
+                    st.json(_mv['pool_protocol'])
+            st.caption(
+                f"B1 基准仅由首批成员（首次资格日 ≤ 前向起点 {_mv['forward_start']}，"
+                f"当前 {_mv['first_batch'] or '—'}）构成，后加入股票永不进入 B1；"
+                "新股回填的历史信号不追溯计入前向，前向样本自入池日起积累")
+        except Exception as e:
+            st.error(f"池构成面板读取失败: {e}")
 
         # ---------- 前向视图 ----------
         try:

@@ -176,9 +176,12 @@ def t10_pipeline_last_run():
     if r is None:
         print("  [SKIP] 尚未运行过管道(可接受, 看板会提示)")
         return
-    # 模块9 起 8 步: 原六步 + macro(宏观重采) + overlay_days(封锁日台账)
-    check("报告含 steps", 'steps' in r and len(r['steps']) == 8,
-          str(list(r.get('steps', {}).keys())))
+    # 模块10起管道为9步(首步onboard_check); 旧报告(6/8步)属历史运行, 不判失败
+    if 'onboard_check' in r.get('steps', {}):
+        check("报告含 steps 且为模块10后9步", len(r['steps']) == 9,
+              str(list(r.get('steps', {}).keys())))
+    else:
+        print(f"  [SKIP] 旧管道报告({len(r.get('steps', {}))}步, 模块10前), 部署后重跑即9步")
     check("报告含新鲜度", 'freshness' in r)
 
 
