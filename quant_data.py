@@ -4834,11 +4834,14 @@ def run_macro_fdr(q=FDR_Q, min_n=FDR_MIN_N, max_cov=OVERLAY_MAX_COV,
             'diagnostic': diag, 'strata': strata}
 
 
-def refresh_overlay_days(min_date=None, log=print):
+def refresh_overlay_days(min_date=None, log=print, codes=None):
     """封锁日台账追加(幂等: UNIQUE(code,trade_date,group_id) + INSERT OR IGNORE)
     按冻结配置把入选组事件映射为各股封锁日; min_date 守卫: 只插 trade_date > min_date
     (已入库净值覆盖的日期永不回补封锁——迟到信息只作用于未来, 见 模块9开发计划.md 2.4)
-    min_date=None → 全历史种子(交付时一次性执行)"""
+    min_date=None → 全历史种子(交付时一次性执行)
+    codes=None → 全池; codes=[code] → 单股种子(模块10 onboard: 新股无已入库净值且
+    join_eff=当日, 全历史种子安全 — 入池前该股无资格触发, 不影响其它股已入库净值的重放;
+    入池日之后的封锁日由管道 overlay_days 步的守卫继续追加)"""
     conn = get_db()
     create_m9_tables(conn)
     cfg_row = conn.execute("SELECT value FROM macro_overlay_meta "
@@ -4859,6 +4862,8 @@ def refresh_overlay_days(min_date=None, log=print):
         n_days = g['window_days']
         n_ins = 0
         for code, sc in stock_cals.items():
+            if codes is not None and code not in codes:
+                continue
             if sc['market'] != INDEX_MARKET_CN.get(g['index_code']):
                 continue
             blocks = _m9_block_dates(sc['dates'], g['index_code'], index_cals,
@@ -5141,7 +5146,10 @@ def _replay_signals_for(code, market, name, log=None):
 
 
 def onboard_pool_stock(code, log=print, recalc_modules=False):
-    """模块10 入池引导链: 行情回填→基准指数→指标→信号回放→宽表→join事件兜底
+    """模块10 入池引导链: 行情回填→深度校验→基准指数→指标→信号回放→宽表→
+    overlay封锁日种子→join事件兜底
+    (深度校验在指标前: 源缺口补插的行情必须先落库再算指标/信号;
+    overlay种子在宽表后: 新股历史封锁日一次性入台账, 管道守卫只补截断日之后)
     逐步独立 try/except(失败报告不中断); 全程幂等可重复
     recalc_modules=True 追加池结构变化收尾三件套(模块3三口径重算+回测新批次)"""
     code = code.strip().upper()
@@ -5161,10 +5169,12 @@ def onboard_pool_stock(code, log=print, recalc_modules=False):
             rep['ok'] = False
 
     step('quotes_backfill', lambda: _onboard_backfill_quotes(code, market))
+    step('depth_verify', lambda: _verify_source_depth(code, market, log=log))
     step('benchmark', lambda: _onboard_ensure_benchmark(market))
     step('indicators', lambda: generate_indicators(code))
     step('signal_replay', lambda: _replay_signals_for(code, market, s.get('name', '')))
     step('wide_table', lambda: generate_wide_table(code, days=3000))
+    step('overlay_seed', lambda: _onboard_seed_overlay(code))
     step('join_event', lambda: _onboard_ensure_join(code, s))
     if recalc_modules:
         step('module3_recalc', lambda: run_module3_analysis())
@@ -5187,6 +5197,193 @@ def _onboard_backfill_quotes(code, market):
     else:
         n = collect_us_daily(code, days)
     return n or 0
+
+
+# --- 模块10 深度校验: 区分『上市新股·源端全量』与『回填截断/源缺口』 ---
+_EM_KLINE_HDR = {
+    "accept": "*/*",
+    "referer": "https://quote.eastmoney.com/",
+    "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                  "(KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36",
+}
+
+
+def _em_kline(code, market, fqt=0, beg='19900101', end='20501231'):
+    """东财日线第二源探针/取数(curl_cffi 浏览器指纹 — akshare stock_hk_hist 的
+    裸 requests 会被东财远端断连, 同宏观日历的 WAF 问题)
+    fqt: 0=不复权(探真实上市起点) 1=前复权(补插数据)
+    返回 (name, DataFrame[date,open,close,high,low,volume,amount,amplitude,change_pct])
+    无数据/异常返回 (None, None)"""
+    if market == '港股':
+        secid = f"116.{code}"
+    elif market == 'A股':
+        secid = ('1.' if code.startswith('6') else '0.') + code
+    else:
+        return None, None
+    try:
+        r = cffi_requests.get(
+            "https://push2his.eastmoney.com/api/qt/stock/kline/get",
+            params={"secid": secid,
+                    "fields1": "f1,f2,f3,f4,f5,f6",
+                    "fields2": "f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61",
+                    "klt": "101", "fqt": str(fqt), "beg": beg, "end": end},
+            headers=_EM_KLINE_HDR, impersonate="chrome110", timeout=20)
+        r.raise_for_status()
+        d = r.json().get('data') or {}
+        kl = d.get('klines') or []
+        if not kl:
+            return None, None
+        rows = []
+        for line in kl:
+            p = line.split(',')
+            rows.append({'date': p[0], 'open': float(p[1]), 'close': float(p[2]),
+                         'high': float(p[3]), 'low': float(p[4]),
+                         'volume': int(float(p[5])), 'amount': float(p[6]),
+                         'amplitude': float(p[7]), 'change_pct': float(p[8])})
+        return d.get('name'), pd.DataFrame(rows)
+    except Exception as e:
+        print(f"[_em_kline] {code}: {type(e).__name__}: {e}")
+        return None, None
+
+
+def _save_depth_meta(rec):
+    """深度校验结果落 forward_meta(source_depth:<code>): DELETE+INSERT 按键幂等"""
+    conn = get_db()
+    create_forward_tables(conn)
+    key = f"source_depth:{rec['code']}"
+    conn.execute("DELETE FROM forward_meta WHERE meta_key=?", (key,))
+    conn.execute(
+        "INSERT INTO forward_meta(meta_key, result_json, run_date, generated_at) "
+        "VALUES(?,?,?,?)",
+        (key, json.dumps(rec, ensure_ascii=False, default=str),
+         datetime.now().strftime('%Y-%m-%d'),
+         datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
+    conn.commit()
+    conn.close()
+
+
+def get_source_depth_notes():
+    """UI 读路径(无DDL): {code: 深度校验记录} — 上市新股/回填对齐/源缺口标注"""
+    conn = get_db()
+    out = {}
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
+                    "AND name='forward_meta'").fetchone():
+        for k, j in conn.execute(
+                "SELECT meta_key, result_json FROM forward_meta "
+                "WHERE meta_key LIKE 'source_depth:%'"):
+            try:
+                d = json.loads(j)
+                out[d.get('code')] = d
+            except Exception:
+                pass
+    conn.close()
+    return out
+
+
+def _backfill_pool_name(code, name):
+    """池内无名股票回填名称(东财 kline 响应自带 name, 深度校验顺带完成 —
+    UI 股票池表/事件研究展示均依赖 name, 缺名会让新股显示为空白行)"""
+    if not name:
+        return 0
+    conn = get_db()
+    cur = conn.execute("UPDATE stock_pool SET name=? WHERE code=? "
+                       "AND (name IS NULL OR name='')", (name, code))
+    conn.commit()
+    n = cur.rowcount
+    conn.close()
+    return n
+
+
+def _verify_source_depth(code, market, log=print):
+    """模块10 深度校验: 新股回填后区分『上市新股·源端全量』与『回填截断/源缺口』
+    本地起点晚于 QUOTE_BACKFILL_START 时, 用东财(独立第二源)探测真实历史起点:
+    - 两源起点一致(±7日) → listing_confirmed=True(上市新股, 数据已对齐, 无可补)
+    - 东财明显更深 → 源缺口: 取东财 qfq 补插更早区间(重叠段价格校验,
+      不一致则整段换源 — 新股无已入库净值, 全量重写安全)
+    结果 DELETE+INSERT 落 forward_meta; 美股跳过(东财美股 secid 多交易所前缀不定)"""
+    conn = get_db()
+    n, local_start = conn.execute(
+        "SELECT COUNT(*), MIN(trade_date) FROM daily_quotes WHERE code=?",
+        (code,)).fetchone()
+    conn.close()
+    rec = {'code': code, 'market': market, 'local_rows': n,
+           'local_start': local_start,
+           'verified_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+    if not local_start:
+        rec.update({'note': '无行情', 'detail': '深度校验前必须有行情回填'})
+        _save_depth_meta(rec)
+        return rec
+    if market == '美股':
+        rec.update({'note': '未校验(美股)', 'detail': '东财美股 secid 多交易所前缀不定, 暂不探测'})
+        _save_depth_meta(rec)
+        return rec
+    if local_start <= QUOTE_BACKFILL_START:
+        rec.update({'note': '回填对齐·全量',
+                    'detail': f'起点{local_start} ≤ 回填目标{QUOTE_BACKFILL_START}'})
+        _save_depth_meta(rec)
+        return rec
+    name, em_raw = _em_kline(code, market, fqt=0)
+    if em_raw is None:
+        rec.update({'note': '深度未确认', 'detail': '第二源(东财)无该股数据或请求失败'})
+        _save_depth_meta(rec)
+        return rec
+    em_start = em_raw.iloc[0]['date']
+    rec.update({'em_name': name, 'em_start': em_start, 'em_rows': len(em_raw)})
+    if name:
+        rec['name_backfilled'] = _backfill_pool_name(code, name)
+    gap_days = abs((datetime.strptime(em_start, '%Y-%m-%d')
+                    - datetime.strptime(local_start, '%Y-%m-%d')).days)
+    if gap_days <= 7:
+        rec.update({'listing_confirmed': True, 'gap_filled': 0,
+                    'note': '上市新股·源端全量',
+                    'detail': f'新浪起点{local_start} = 东财起点{em_start}({name}), '
+                              f'无可补数据'})
+        _save_depth_meta(rec)
+        log(f"  [depth] {code}: 上市新股·源端全量({em_start} 起, {name})")
+        return rec
+    _, em_qfq = _em_kline(code, market, fqt=1)
+    if em_qfq is None:
+        rec.update({'listing_confirmed': False, 'gap_filled': 0,
+                    'note': '深度未确认',
+                    'detail': f'东财更深(自{em_start})但 qfq 取数失败, 未补插'})
+        _save_depth_meta(rec)
+        return rec
+    conn = get_db()
+    local_map = {r[0]: r[1] for r in conn.execute(
+        "SELECT trade_date, close FROM daily_quotes WHERE code=? AND trade_date>=?",
+        (code, em_qfq.iloc[0]['date']))}
+    conn.close()
+    ov = em_qfq[em_qfq['date'].isin(local_map)]
+    mism = sum(1 for _, r in ov.iterrows()
+               if abs(r['close'] - local_map[r['date']]) / local_map[r['date']] > 0.002)
+    if ov.empty or mism:
+        df = em_qfq.copy()
+        gap = _save_daily_quotes(df, code, market, data_source="eastmoney")
+        rec.update({'listing_confirmed': False, 'gap_filled': gap,
+                    'note': f'源缺口已补{gap}行(整段换源)',
+                    'detail': f'东财自{em_start}更深, 重叠段不一致({mism}/{len(ov)}), '
+                              f'整段以东财qfq重写'})
+    else:
+        df = em_qfq[em_qfq['date'] < local_start].copy()
+        gap = _save_daily_quotes(df, code, market, data_source="eastmoney")
+        rec.update({'listing_confirmed': False, 'gap_filled': gap,
+                    'note': f'源缺口已补{gap}行',
+                    'detail': f'东财自{em_start}更深, 重叠段价格一致, 补插更早区间'})
+    _save_depth_meta(rec)
+    log(f"  [depth] {code}: {rec['note']}")
+    return rec
+
+
+def _onboard_seed_overlay(code):
+    """模块10 overlay 历史封锁日单股种子(管道 overlay_days 步的 min_date 守卫只补
+    截断日之后, 新股的历史封锁日若不在引导链补齐将永久缺失 → S*M 回测把它当
+    『历史上从未被封锁』)。安全性: 新股无已入库净值且入池前无资格触发,
+    全历史种子不影响任何已入库净值; 幂等(INSERT OR IGNORE)"""
+    rep = refresh_overlay_days(min_date=None, codes=[code], log=lambda m: None)
+    if 'error' in rep:
+        return {'skipped': rep['error']}
+    return {'inserted': rep.get('inserted', 0),
+            'ledger_total': rep.get('ledger_total')}
 
 
 def _onboard_ensure_benchmark(market):
@@ -5232,6 +5429,17 @@ def get_pool_onboard_status():
         "SELECT code, MIN(eff_date) FROM forward_pool_events "
         "WHERE event='join' GROUP BY code").fetchall()
     first_join = {r[0]: r[1] for r in events}
+    depth_note = {}
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
+                    "AND name='forward_meta'").fetchone():
+        for _k, _j in conn.execute(
+                "SELECT meta_key, result_json FROM forward_meta "
+                "WHERE meta_key LIKE 'source_depth:%'"):
+            try:
+                _d = json.loads(_j)
+                depth_note[_d.get('code')] = _d.get('note', '')
+            except Exception:
+                pass
     idx_dates = {}
     for m in ['A股', '港股', '美股']:
         idx_dates[m] = [r[0] for r in conn.execute(
@@ -5260,6 +5468,7 @@ def get_pool_onboard_status():
             'quotes': q[0], 'quote_latest': ql, 'lag_trading_days': lag,
             'signals': n_sig, 'indicators': n_ind, 'wide': n_wide,
             'forward_join': first_join.get(code, FORWARD_START),
+            'depth_note': depth_note.get(code, ''),
             'needs_onboard': bool(needs),
             'ready': not needs,
         })

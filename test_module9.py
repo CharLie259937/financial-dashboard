@@ -133,12 +133,17 @@ pool_codes = {s['code']: s['market'] for s in pool}
 check("台账非空且每行 group_id ∈ 入选组", len(led) > 0 and all(
     r['group_id'] in gids for r in led), f"{len(led)} 行")
 mkt_map = {'HSI': '港股', '.INX': '美股', 'sh000300': 'A股'}
-trace_ok = all(r['code'] in pool_codes for r in led)
+# 模块10: 离池股台账行必须保留(关闭区间 S*M 重放依赖其封锁日, 删除会破坏
+# 已入库 NAV 零失配硬指标) → 台账股票 ⊆ 活跃池 ∪ 曾入池成员(事件表留痕)
+ev_codes = {r[0]: r[1] for r in conn.execute(
+    "SELECT DISTINCT code, market FROM forward_pool_events")}
+known = {**ev_codes, **pool_codes}
+trace_ok = all(r['code'] in known for r in led)
 gid_mkt = {g['group_id']: mkt_map[g['index_code']] for g in cfg['groups']}
-check("台账股票均在池内", trace_ok,
+check("台账股票均在(活跃池∪曾入池成员)", trace_ok,
       f"股票={sorted({r['code'] for r in led})}")
 check("台账股票市场与组指数匹配",
-      all(pool_codes[r['code']] == gid_mkt[r['group_id']] for r in led if r['code'] in pool_codes))
+      all(known[r['code']] == gid_mkt[r['group_id']] for r in led))
 dup = conn.execute(
     "SELECT COUNT(*) FROM (SELECT code, trade_date, group_id FROM macro_overlay_days "
     "GROUP BY code, trade_date, group_id HAVING COUNT(*)>1)").fetchone()[0]

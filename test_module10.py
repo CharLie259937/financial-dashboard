@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
 """模块10测试: 股票池动态扩容与数据引导
 全程在临时库副本上执行(sqlite3 backup 复制, 真实库只读):
-迁移事件表 / 港股代码归一化 / onboard引导链(采集步打桩) / 资格区间过滤 /
-B1首批成员冻结 / 离池快照零失配 / 停用再激活 / 管道孤儿股补课(9步) / 读路径无DDL
+迁移事件表 / 港股代码归一化 / onboard引导链(采集步打桩, 含深度校验+overlay种子) /
+资格区间过滤 / B1首批成员冻结 / 离池快照零失配 / 停用再激活 / 管道孤儿股补课(9步) /
+读路径无DDL
 运行目录: Desktop\\financial_dashboard (依赖真实库的池与前向已入库数据)"""
 import inspect
 import json
@@ -11,7 +12,7 @@ import shutil
 import sqlite3
 import sys
 import tempfile
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pandas as pd
 
@@ -64,6 +65,44 @@ check("副本含池与前向已入库数据", n_pool >= 3 and n_fwd_eq >= 10,
 if n_fwd_eq < 10:
     print("!! 前向已入库数据不足, 零失配断言无意义 — 请在 Desktop 运行目录执行本测试")
     sys.exit(1)
+
+# 深度校验/overlay种子 实库部署态(2026-09-09 修复后): 直接读原库(只读)
+# 注: 00100 已由用户于 2026-09-08 18:38 移除(离池快照7行px/6信号留存, 数据级联删除),
+# 深度标注断言仅覆盖在池新股 02513
+_rc = sqlite3.connect(_real_db)
+_rc.row_factory = sqlite3.Row
+_ov_02513 = _rc.execute(
+    "SELECT COUNT(*) FROM macro_overlay_days WHERE code='02513'").fetchone()[0]
+_dep_rows = {}
+for _k, _j in _rc.execute("SELECT meta_key, result_json FROM forward_meta "
+                          "WHERE meta_key LIKE 'source_depth:%'"):
+    try:
+        _dep_rows[_k] = json.loads(_j)
+    except Exception:
+        pass
+_rc.close()
+check("02513 overlay 历史封锁日已种子(实库, 引导链缺口已补)", _ov_02513 > 0,
+      f"rows={_ov_02513}")
+check("02513 深度标注=上市新股·源端全量(双源一致确认)",
+      _dep_rows.get('source_depth:02513', {}).get('note') == '上市新股·源端全量',
+      str({k: v.get('note') for k, v in _dep_rows.items()}))
+
+# 深度校验真实函数(早退路径, 无网络): 必须在 [5] 打桩之前执行 —
+# [5] 的桩会覆盖模块属性 qd._verify_source_depth
+_dep700 = qd._verify_source_depth('00700', '港股', log=lambda m: None)
+check("深度校验: 覆盖达标股早退 → 回填对齐·全量",
+      _dep700.get('note') == '回填对齐·全量', str(_dep700))
+_dconn = qd.get_db()
+_n700 = _dconn.execute("SELECT COUNT(*) FROM forward_meta "
+                       "WHERE meta_key='source_depth:00700'").fetchone()[0]
+_dconn.close()
+check("深度记录 DELETE+INSERT 落库(单行)", _n700 == 1, f"rows={_n700}")
+qd._verify_source_depth('00700', '港股', log=lambda m: None)
+_dconn = qd.get_db()
+_n700b = _dconn.execute("SELECT COUNT(*) FROM forward_meta "
+                        "WHERE meta_key='source_depth:00700'").fetchone()[0]
+_dconn.close()
+check("深度记录幂等(重跑仍单行, 无重复meta)", _n700b == 1, f"rows={_n700b}")
 
 
 # ============================================================
@@ -171,10 +210,9 @@ rep_sw = qd.run_forward_step(log=lambda m: None)
 check("换码后前向重放仍零失配", rep_sw['mismatches'] == []
       and rep_sw['new_equity_rows'] == 0)
 _ob = {s['code']: s for s in qd.get_pool_onboard_status()}
-check("00100 已完成实库引导部署(行情/指标/信号/宽表齐备 → ready 非孤儿)",
-      _ob.get('00100', {}).get('quotes', 0) > 0
-      and _ob.get('00100', {}).get('wide', 0) > 0
-      and _ob.get('00100', {}).get('needs_onboard') is False,
+check("00100 换码重入池后为孤儿(移除时数据已级联删除 → 待[9]管道补课)",
+      _ob.get('00100', {}).get('quotes', 0) == 0
+      and _ob.get('00100', {}).get('needs_onboard') is True,
       f"00100={_ob.get('00100')}")
 
 
@@ -183,15 +221,25 @@ check("00100 已完成实库引导部署(行情/指标/信号/宽表齐备 → r
 # ============================================================
 section("[5] 入池引导链(采集打桩, 指标/信号/宽表走真实生产代码)")
 
-def _fabricate_quotes(code, market, days_end='2026-09-10'):
-    """伪造 ~500 交易日随机游走 OHLCV, 植入三个大跌日:
-    2026-08-20(前向窗口前) / 2026-09-01(窗口内·入池前=不追溯) / 2026-09-08(≥入池日=计入)"""
-    dates = pd.bdate_range(end=days_end, periods=500)
+# 三个大跌日: 前向窗口前(固定) / 窗口内·入池前(固定, 任何运行日都早于入池) /
+# 入池日起(动态=今天或其后首个交易日 — add_to_pool 写 join eff=当天, 测试在任何
+# 日期运行都成立; 序列端点=今天+2天, 周末/节假日运行也能取到 ≥join 的交易日)
+_JOIN_DAY = datetime.now().strftime('%Y-%m-%d')
+_DAYS_END = (datetime.now() + timedelta(days=2)).strftime('%Y-%m-%d')
+_dates_all = [d.strftime('%Y-%m-%d') for d in pd.bdate_range(end=_DAYS_END, periods=500)]
+_ON_JOIN_DAY = next(d for d in _dates_all if d >= _JOIN_DAY)
+_DROP_DAYS = ('2026-08-20', '2026-09-01', _ON_JOIN_DAY)
+
+
+def _fabricate_quotes(code, market):
+    """伪造 ~500 交易日随机游走 OHLCV, 植入三个大跌日 _DROP_DAYS:
+    2026-08-20(前向窗口前) / 2026-09-01(窗口内·入池前=不追溯) / 入池日起(≥join=计入)"""
+    dates = pd.bdate_range(end=_DAYS_END, periods=500)
     rows = []
     prev_close = None
     for d in dates:
         ds = d.strftime('%Y-%m-%d')
-        if ds in ('2026-08-20', '2026-09-01', '2026-09-08'):
+        if ds in _DROP_DAYS:
             close = prev_close * 0.92 if prev_close else 100.0
         else:
             drift = 0.0005 * ((hash(ds) % 11) - 5)
@@ -211,6 +259,8 @@ def _fabricate_quotes(code, market, days_end='2026-09-10'):
     return qd._save_daily_quotes(df, code, market, data_source="m10_test")
 
 qd._onboard_backfill_quotes = lambda code, market: _fabricate_quotes(code, market)
+qd._verify_source_depth = lambda code, market, log=print: {
+    'code': code, 'note': '上市新股·源端全量(桩)', 'checked': True}
 added = qd.add_to_pool('TESTHK', '港股')
 check("TESTHK 入池(字母代码 zfill 不变形)", added == 'TESTHK')
 ob_rep = qd.onboard_pool_stock('TESTHK', log=lambda m: None)
@@ -222,10 +272,19 @@ cov = {t: conn.execute(f"SELECT COUNT(*) FROM {t} WHERE code='TESTHK'").fetchone
 sig_dates = [r[0] for r in conn.execute(
     "SELECT DISTINCT trade_date FROM passive_signals WHERE code='TESTHK' "
     "AND signal_type='price_limit' AND signal_subtype='大跌' ORDER BY trade_date")]
+_ov_thk = conn.execute(
+    "SELECT COUNT(*) FROM macro_overlay_days WHERE code='TESTHK'").fetchone()[0]
 conn.close()
 check("四表数据齐备(行情/指标/信号/宽表)", all(v > 0 for v in cov.values()), str(cov))
 check("大跌信号在三个目标日检出(±0.05%随机游走不误触发)",
-      {'2026-08-20', '2026-09-01', '2026-09-08'} == set(sig_dates), f"sig_dates={sig_dates}")
+      set(_DROP_DAYS) == set(sig_dates), f"sig_dates={sig_dates}")
+check("引导链 overlay 种子: TESTHK 历史封锁日入台账(冻结配置映射)",
+      _ov_thk > 0, f"rows={_ov_thk}")
+ob_rep2 = qd.onboard_pool_stock('TESTHK', log=lambda m: None)
+check("引导链幂等: overlay 种子重跑 0 新增(INSERT OR IGNORE)",
+      ob_rep2['steps']['overlay_seed'].get('inserted') == 0,
+      str(ob_rep2['steps'].get('overlay_seed')))
+check("引导链幂等: 深度校验重跑不报错", ob_rep2['ok'] is True)
 _ob = {s['code']: s for s in qd.get_pool_onboard_status()}
 check("onboard 状态就绪(无需补课)", _ob['TESTHK']['ready'] is True)
 
@@ -238,11 +297,11 @@ fwd = qd._forward_replay_data()
 mem = qd._forward_membership()
 trig_s1a = {(c, d) for (c, d) in qd._collect_triggers(fwd, qd.BT_STRATEGIES['S1a'])
             if d >= qd.FORWARD_START}
-check("TESTHK 回填信号进入原始触发集(09-01/09-08)",
-      ('TESTHK', '2026-09-01') in trig_s1a and ('TESTHK', '2026-09-08') in trig_s1a)
+check("TESTHK 回填信号进入原始触发集(入池前+入池日)",
+      ('TESTHK', '2026-09-01') in trig_s1a and ('TESTHK', _ON_JOIN_DAY) in trig_s1a)
 _fwd_trig = {(c, d) for (c, d) in trig_s1a if qd._member_on(mem, c, d)}
-check("资格过滤后: 入池前(09-01)剔除 / 入池日起(09-08)保留",
-      ('TESTHK', '2026-09-01') not in _fwd_trig and ('TESTHK', '2026-09-08') in _fwd_trig)
+check("资格过滤后: 入池前(09-01)剔除 / 入池日起(_ON_JOIN_DAY)保留",
+      ('TESTHK', '2026-09-01') not in _fwd_trig and ('TESTHK', _ON_JOIN_DAY) in _fwd_trig)
 rep1 = qd.run_forward_step(log=lambda m: None)
 check("TESTHK 就位后前向重放零失配(历史不追溯⇒已入库净值不变)",
       rep1['mismatches'] == [], f"mismatches={rep1['mismatches'][:3]}")
@@ -333,8 +392,8 @@ check("再激活后前向重放零失配(开放区间用实时表)",
 section("[9] 管道孤儿股自动补课")
 qd.add_to_pool('ORPHAN', '港股')
 _oc = qd._pipeline_onboard_check(log=lambda m: None)
-check("孤儿股被检测并自动引导(ORPHAN; 00100 已实库部署就绪无需补课)",
-      _oc['checked'] == 1 and _oc['onboarded'] == ['ORPHAN'],
+check("孤儿股被检测并自动引导(00100 换码重入池无数据 + ORPHAN)",
+      _oc['checked'] == 2 and _oc['onboarded'] == ['00100', 'ORPHAN'],
       f"checked={_oc['checked']}, onboarded={_oc['onboarded']}")
 _ob = {s['code']: s for s in qd.get_pool_onboard_status()}
 check("补课后两股均就绪", _ob['00100']['ready'] is True and _ob['ORPHAN']['ready'] is True)

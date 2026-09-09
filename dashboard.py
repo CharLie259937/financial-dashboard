@@ -817,6 +817,7 @@ elif page == "量化分析":
                     "覆盖(行/指标/信号/宽表)": (f"{ob['quotes']}/{ob['indicators']}/"
                                                f"{ob['signals']}/{ob['wide']}" if ob else "0/0/0/0"),
                     "前向资格日": (ob or {}).get("forward_join", "—"),
+                    "数据深度": (ob or {}).get("depth_note") or "—",
                     "数据状态": ("✅ 就绪" if ob and ob["ready"] else "⚠️ 需引导"),
                     "涨幅阈值": f"±{s.get('price_threshold', 5.0)}%",
                     "量能倍数": f"{s.get('volume_ratio', 2.0)}x",
@@ -827,7 +828,8 @@ elif page == "量化分析":
             ga1, ga2 = st.columns(2)
             with ga1:
                 ob_code = st.selectbox("引导/补数据", [s["code"] for s in pool], key="qp_ob_code")
-                if st.button("🚀 引导/补数据（行情→指标→信号回放→宽表）", key="qp_ob_btn"):
+                if st.button("🚀 引导/补数据（行情→深度校验→指标→信号→宽表→封锁日）",
+                             key="qp_ob_btn"):
                     with st.status(f"{ob_code} 引导链运行中...", expanded=True) as ob2:
                         def _ob2_log(msg):
                             st.write(str(msg))
@@ -1124,12 +1126,16 @@ elif page == "量化分析":
             "回测冻结协议：数据扩展允许，参数/池/策略变更禁止")
 
         bf_status = quant_data.get_backfill_status()
+        _dep_notes = quant_data.get_source_depth_notes()
         bf_c1, bf_c2 = st.columns(2)
         with bf_c1:
             st.write("**行情覆盖（当前池）**")
             st.dataframe(pd.DataFrame([{
                 "代码": s['code'], "市场": s['market'], "行数": s['n'],
                 "起点": s['s'], "终点": s['e'],
+                "深度": (_dep_notes.get(s['code']) or {}).get('note')
+                or ("回填对齐" if s['s'] and s['s'] <= quant_data.QUOTE_BACKFILL_START
+                    else "未校验"),
             } for s in bf_status['stocks']]), use_container_width=True, hide_index=True)
             st.caption(
                 f"指标 {bf_status['indicators']['rows']} 行 · "
