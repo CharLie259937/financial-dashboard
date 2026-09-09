@@ -345,6 +345,99 @@ def _get_a_share_prefix(code):
     return 'sh'
 
 
+def _yahoo_symbol_for(code, market):
+    """Yahoo日线兜底符号映射(数据源审计2026-09-10): 港股4位无前导零
+    (00700->0700.HK; 注意 00700.HK 是僵尸别名·2019年停更), A股沪.SS/深.SZ(北交无), 美股复用_yahoo_symbol"""
+    code = code.strip()
+    if market == "美股":
+        return _yahoo_symbol(code)
+    if market == "港股":
+        try:
+            return str(int(code)).zfill(4) + '.HK'
+        except ValueError:
+            return None
+    if market == "A股":
+        suffix = {'sh': '.SS', 'sz': '.SZ'}.get(_get_a_share_prefix(code))
+        return f"{code}{suffix}" if suffix else None
+    return None
+
+
+def _yahoo_chart_daily(code, market, days=365):
+    """Yahoo v8/finance/chart 日线兜底(akshare/新浪均失败后):
+    - 必须 period1/period2 取数, 禁用 range=max(超量会被降采样, AAPL 42年仅回169根)
+    - adjclose/close 因子缩放 OHLC = 前复权口径, 与库内新浪qfq水平差实测<0.1%
+    - INSERT OR IGNORE: 只补缺失交易日, 绝不改写既有行(兜底源不污染主源数据)
+    - 守卫① exchange=YHD 僵尸符号拒绝; 守卫② 末档较库内陈旧>7天拒绝;
+      守卫③ 重叠日收盘偏差>2% 拒绝(防符号映射错/口径错)"""
+    sym = _yahoo_symbol_for(code, market)
+    if not sym:
+        print(f"  [_yahoo_chart_daily] {code}({market}): 无Yahoo符号映射, 跳过兜底")
+        return 0
+    try:
+        p2 = int(datetime.now().timestamp()) + 86400
+        p1 = p2 - int((days + 30) * 1.6 * 86400)
+        r = _session.get(
+            f"https://query1.finance.yahoo.com/v8/finance/chart/{sym}",
+            params={"period1": p1, "period2": p2, "interval": "1d"}, timeout=20)
+        j = r.json().get('chart', {})
+        if j.get('error'):
+            print(f"  [_yahoo_chart_daily] {code}: {j['error']}")
+            return 0
+        rr = (j.get('result') or [None])[0]
+        if not rr:
+            print(f"  [_yahoo_chart_daily] {code}: {sym} 无数据")
+            return 0
+        meta = rr.get('meta', {})
+        if meta.get('exchangeName') == 'YHD':
+            print(f"  [_yahoo_chart_daily] {code}: 僵尸符号 {sym}(YHD别名) 拒绝")
+            return 0
+        ts = rr.get('timestamp') or []
+        q = (rr.get('indicators', {}).get('quote') or [{}])[0]
+        adj = rr.get('indicators', {}).get('adjclose')
+        adj = adj[0].get('adjclose') if adj else None
+        if not ts or not adj:
+            print(f"  [_yahoo_chart_daily] {code}: 无K线或无adjclose")
+            return 0
+        df = pd.DataFrame({"ts": ts, "open": q.get("open"), "high": q.get("high"),
+                           "low": q.get("low"), "close": q.get("close"),
+                           "volume": q.get("volume")})
+        if len(adj) >= len(df):
+            df["adj"] = adj[:len(df)]
+        else:
+            df["adj"] = list(adj) + [None] * (len(df) - len(adj))
+        df = df.dropna(subset=["close", "adj"]).copy()
+        if not len(df):
+            return 0
+        factor = df["adj"].astype(float) / df["close"].astype(float)
+        for col in ("open", "high", "low", "close"):
+            df[col] = (df[col].astype(float) * factor).round(4)
+        df["date"] = pd.to_datetime(df["ts"], unit="s").dt.strftime("%Y-%m-%d")
+        df = df.drop_duplicates(subset="date").sort_values("date").reset_index(drop=True)
+        conn = get_db()
+        last = conn.execute("SELECT trade_date, close FROM daily_quotes WHERE code=? "
+                            "ORDER BY trade_date DESC LIMIT 1", (code,)).fetchone()
+        conn.close()
+        if last:
+            stale_before = (pd.to_datetime(last["trade_date"]) - pd.Timedelta(days=7)).strftime("%Y-%m-%d")
+            if df["date"].max() < stale_before:
+                print(f"  [_yahoo_chart_daily] {code}: Yahoo末档{df['date'].max()} "
+                      f"较库内{last['trade_date']}陈旧>7天, 拒绝")
+                return 0
+            overlap = df[df["date"] == last["trade_date"]]
+            if len(overlap):
+                dev = abs(float(overlap.iloc[0]["close"]) - float(last["close"])) / float(last["close"])
+                if dev > 0.02:
+                    print(f"  [_yahoo_chart_daily] {code}: 重叠日收盘偏差{dev*100:.1f}%>2%, 拒绝落库")
+                    return 0
+        df["change_pct"] = (df["close"].pct_change() * 100).round(2)
+        df["amplitude"] = ((df["high"] - df["low"]) / df["close"].shift(1) * 100).round(2)
+        df = df.tail(days)
+        return _save_daily_quotes(df, code, market, data_source="yahoo", replace=False)
+    except Exception as e:
+        print(f"  [_yahoo_chart_daily] {code}: {e}")
+        return 0
+
+
 def collect_a_share_daily(code, days=365):
     code = code.strip()
     prefix = _get_a_share_prefix(code)
@@ -383,7 +476,7 @@ def collect_a_share_daily(code, days=365):
             return len(df)
     except Exception as e:
         print(f"  [collect_a_share_daily/sina] {code}: {e}")
-    return 0
+    return _yahoo_chart_daily(code, "A股", days)
 
 
 def collect_us_daily(symbol, days=365):
@@ -401,7 +494,7 @@ def collect_us_daily(symbol, days=365):
             return len(df)
     except Exception as e:
         print(f"  [collect_us_daily] {symbol}: {e}")
-    return 0
+    return _yahoo_chart_daily(symbol, "美股", days)
 
 
 def collect_hk_daily(code, days=365):
@@ -419,17 +512,19 @@ def collect_hk_daily(code, days=365):
             return len(df)
     except Exception as e:
         print(f"  [collect_hk_daily] {code}: {e}")
-    return 0
+    return _yahoo_chart_daily(code, "港股", days)
 
 
-def _save_daily_quotes(df, code, market, data_source="manual"):
+def _save_daily_quotes(df, code, market, data_source="manual", replace=True):
     conn = get_db()
     count = 0
+    sql = ("INSERT OR REPLACE INTO daily_quotes " if replace
+           else "INSERT OR IGNORE INTO daily_quotes ")
     for _, row in df.iterrows():
         trade_date = row['date'].strftime('%Y-%m-%d') if hasattr(row['date'], 'strftime') else str(row['date'])[:10]
         try:
-            conn.execute(
-                "INSERT OR REPLACE INTO daily_quotes "
+            cur = conn.execute(
+                sql +
                 "(trade_date, code, market, name, open, high, low, close, volume, amount, "
                 "change_pct, amplitude, turnover_rate, pe_ratio, pb_ratio, "
                 "total_market_cap, circ_market_cap, net_inflow, data_source) "
@@ -444,7 +539,7 @@ def _save_daily_quotes(df, code, market, data_source="manual"):
                  float(row.get('circ_mv', 0)), float(row.get('net_inflow', 0)),
                  data_source)
             )
-            count += 1
+            count += max(cur.rowcount, 0)
         except Exception as e:
             print(f"  [_save_daily_quotes] {code} {trade_date}: {e}")
     conn.commit()
