@@ -1198,6 +1198,38 @@ elif page == "量化分析":
             except Exception as e:
                 st.error(f"后台启动失败: {e}")
 
+        # --- 模块11: 分钟级数据(观察口径) ---
+        st.subheader("🕐 分钟级数据（模块 11 · 观察口径）")
+        st.caption(
+            "Yahoo 分钟K线 · 5m 前向采集（60 天容错窗）+ 60m 回填（近 2 年）· "
+            "未复权（源无 adjclose，与日线 qfq 对齐留到分析层）· "
+            "仅观察用途不触碰冻结回测 · 每日管道自动增量（近 7 天）· "
+            "源窗口硬限：1m 仅 7 天 / 5m·15m·30m 仅 60 天 / 60m 730 天")
+
+        _iv_status = quant_data.get_intraday_status()
+        st.dataframe(pd.DataFrame([{
+            "代码": r['code'], "名称": r['name'], "市场": r['market'],
+            "粒度": r['interval'], "行数": r['rows'],
+            "起点": r['start'], "终点": r['end'],
+        } for r in _iv_status['rows']]), use_container_width=True, hide_index=True)
+
+        if st.button("▶️ 回填分钟数据（5m 近60天 + 60m 近2年，幂等）", key="m11_backfill"):
+            with st.status("分钟数据回填中...", expanded=True) as m11_status:
+                def _m11_log(msg):
+                    st.write(str(msg))
+                try:
+                    rep = quant_data.collect_intraday_quotes(log=_m11_log)
+                    tot_new = sum(v['new'] for v in rep['rows'].values())
+                    m11_status.update(
+                        label=(f"✅ 分钟数据回填完成：{rep['stocks']} 股 × "
+                               f"{len(rep['intervals'])} 粒度，新增 {tot_new} 根"),
+                        state="complete", expanded=False)
+                    st.rerun()
+                except Exception as e:
+                    m11_status.update(label="❌ 分钟数据回填异常", state="error",
+                                      expanded=True)
+                    st.exception(e)
+
     # --- Tab 2: 信号检测 ---
     with quant_tab2:
         st.subheader("被动信号检测")

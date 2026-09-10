@@ -7,6 +7,7 @@
 import sqlite3
 import os
 import re
+import time
 import bisect
 import pandas as pd
 import numpy as np
@@ -53,6 +54,20 @@ def init_db():
     );
     CREATE INDEX IF NOT EXISTS idx_quotes_code ON daily_quotes(code);
     CREATE INDEX IF NOT EXISTS idx_quotes_date ON daily_quotes(trade_date);
+
+    CREATE TABLE IF NOT EXISTS intraday_quotes(
+        code TEXT NOT NULL,
+        market TEXT NOT NULL,
+        interval TEXT NOT NULL,
+        ts INTEGER NOT NULL,
+        dt_local TEXT NOT NULL,
+        trade_date TEXT NOT NULL,
+        open REAL, high REAL, low REAL, close REAL, volume REAL,
+        data_source TEXT DEFAULT 'yahoo',
+        UNIQUE(code, interval, ts)
+    );
+    CREATE INDEX IF NOT EXISTS idx_intraday_lookup
+        ON intraday_quotes(code, interval, trade_date);
 
     CREATE TABLE IF NOT EXISTS benchmark_index(
         market TEXT NOT NULL,
@@ -4201,8 +4216,8 @@ def get_data_freshness():
 
 
 def run_daily_pipeline(log=print):
-    """模块7每日管道(收盘后运行): 孤儿股补课→行情→指数→指标→信号扫描→宽表→
-    宏观→封锁日台账→前向记录→新鲜度(模块10起 9 步)
+    """模块7每日管道(收盘后运行): 孤儿股补课→行情→分钟数据→指数→指标→信号扫描→
+    宽表→宏观→封锁日台账→前向记录→新鲜度(模块10起9步+模块11分钟步)
     各步独立 try/except(打印异常不静默), 单步失败不阻断后续; 报告存 forward_meta"""
     report = {'steps': {},
               'generated_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
@@ -4219,6 +4234,8 @@ def run_daily_pipeline(log=print):
     # 模块10: 首步孤儿股补课(入池未引导/数据残缺 → 自动执行引导链, 同管道内补齐)
     step('onboard_check', lambda: _pipeline_onboard_check(log=log))
     step('quotes', lambda: batch_collect_daily())
+    # 模块11: 分钟数据增量(5m/60m 近7天, 容错一周缺口; 观察口径不动冻结回测)
+    step('intraday', lambda: collect_intraday_quotes(days=INTRADAY_REFRESH_DAYS))
     step('benchmark', lambda: batch_collect_benchmark())
     step('indicators', lambda: batch_generate_indicators())
     step('signals', lambda: run_signal_detection())
@@ -5242,9 +5259,10 @@ def _replay_signals_for(code, market, name, log=None):
 
 def onboard_pool_stock(code, log=print, recalc_modules=False):
     """模块10 入池引导链: 行情回填→深度校验→基准指数→指标→信号回放→宽表→
-    overlay封锁日种子→join事件兜底
+    overlay封锁日种子→分钟数据种子→join事件兜底(链v1.2, 模块11加入第⑧步)
     (深度校验在指标前: 源缺口补插的行情必须先落库再算指标/信号;
-    overlay种子在宽表后: 新股历史封锁日一次性入台账, 管道守卫只补截断日之后)
+    overlay种子在宽表后: 新股历史封锁日一次性入台账, 管道守卫只补截断日之后;
+    分钟种子在join前: 新股历史分钟一次拉满, 管道日常步只补7天)
     逐步独立 try/except(失败报告不中断); 全程幂等可重复
     recalc_modules=True 追加池结构变化收尾三件套(模块3三口径重算+回测新批次)"""
     code = code.strip().upper()
@@ -5270,6 +5288,7 @@ def onboard_pool_stock(code, log=print, recalc_modules=False):
     step('signal_replay', lambda: _replay_signals_for(code, market, s.get('name', '')))
     step('wide_table', lambda: generate_wide_table(code, days=3000))
     step('overlay_seed', lambda: _onboard_seed_overlay(code))
+    step('intraday_seed', lambda: _onboard_seed_intraday(code, market))
     step('join_event', lambda: _onboard_ensure_join(code, s))
     if recalc_modules:
         step('module3_recalc', lambda: run_module3_analysis())
@@ -5621,3 +5640,199 @@ def get_pool_membership_view():
 
 
 _m10_migrate_events()
+
+
+# ============================================================
+# 模块 11: 分钟级数据 · 观察口径 (2026-09-10)
+# Yahoo v8/finance/chart 分钟K线: 5m 前向采集(60天容错窗) + 60m 回填(730天)
+# 探测结论(2026-09-10 实测, 超源窗口上限返回 HTTP 422, 干净报错):
+#   1m 仅7~8天 / 5m·15m·30m 仅60天 / 60m 730天
+#   → 历史1m无法回填, 日线→分钟"升级"不可行, 只能前向积累+60m近2年
+# 口径: 未复权(分钟响应无 adjclose, 探针2026-09-10), 与 daily_quotes 的
+#   qfq 对齐留到分析层(同日 raw/qfq 比值换算); 仅观察用途, 不触碰冻结回测
+# 落库: UNIQUE(code, interval, ts) + INSERT OR REPLACE(Yahoo为该表唯一源,
+#   自愈当日未收盘的部分K线与迟到修正; 重跑幂等)
+# 详见《模块11开发计划.md》
+# ============================================================
+
+INTRADAY_INTERVALS = ('5m', '60m')               # 采集粒度(观察口径)
+INTRADAY_SRC_LIMITS = {'1m': 7, '5m': 60, '15m': 60, '30m': 60, '60m': 730}
+INTRADAY_REFRESH_DAYS = 7                        # 每日管道增量窗口(容错一周缺口)
+INTRADAY_BACKFILL_DAYS = {'5m': 60, '60m': 730}  # 回填=各粒度源窗口拉满
+
+
+def create_intraday_table(conn):
+    """分钟K线表 DDL(仅写路径调用; 读路径用 sqlite_master 探测, 模块9约定)"""
+    conn.executescript("""
+    CREATE TABLE IF NOT EXISTS intraday_quotes(
+        code TEXT NOT NULL,
+        market TEXT NOT NULL,
+        interval TEXT NOT NULL,
+        ts INTEGER NOT NULL,
+        dt_local TEXT NOT NULL,
+        trade_date TEXT NOT NULL,
+        open REAL, high REAL, low REAL, close REAL, volume REAL,
+        data_source TEXT DEFAULT 'yahoo',
+        UNIQUE(code, interval, ts)
+    );
+    CREATE INDEX IF NOT EXISTS idx_intraday_lookup
+        ON intraday_quotes(code, interval, trade_date);
+    """)
+
+
+def fetch_yahoo_intraday(code, market, interval, days, log=print):
+    """Yahoo 分钟K线取数(原始未复权): 返回 DataFrame[ts, dt_local, trade_date,
+    open, high, low, close, volume]; 无映射/无数据/异常返回空 DataFrame
+    - period1/period2 取数(同日线兜底约定, 禁 range)
+    - 时区: UTC epoch → 交易所本地时区(meta.exchangeTimezoneName),
+      trade_date 取本地日期(美股盘后K线归属其纽约日期, 不用北京日期)
+    - days 超源窗口上限: 截断到上限并记日志(422是干净报错, 提前规避)"""
+    if interval not in INTRADAY_SRC_LIMITS:
+        log(f"  [intraday] {code} {interval}: 非法粒度(支持{list(INTRADAY_SRC_LIMITS)})")
+        return pd.DataFrame()
+    sym = _yahoo_symbol_for(code, market)
+    if not sym:
+        log(f"  [intraday] {code}({market}): 无Yahoo符号映射, 跳过")
+        return pd.DataFrame()
+    limit = INTRADAY_SRC_LIMITS[interval]
+    if days > limit:
+        log(f"  [intraday] {code} {interval}: 请求{days}天超源窗口上限{limit}天, 截断")
+        days = limit
+    try:
+        p2 = int(datetime.now().timestamp()) + 3600
+        p1 = p2 - days * 86400
+        r = _session.get(
+            f"https://query1.finance.yahoo.com/v8/finance/chart/{sym}",
+            params={"period1": p1, "period2": p2, "interval": interval}, timeout=30)
+        if r.status_code != 200:
+            log(f"  [intraday] {code} {interval}: HTTP{r.status_code}")
+            return pd.DataFrame()
+        j = r.json().get('chart', {})
+        if j.get('error'):
+            log(f"  [intraday] {code} {interval}: {j['error']}")
+            return pd.DataFrame()
+        rr = (j.get('result') or [None])[0]
+        ts = (rr or {}).get('timestamp') or []
+        q = ((rr or {}).get('indicators', {}).get('quote') or [{}])[0]
+        if not ts:
+            return pd.DataFrame()
+        tz = rr.get('meta', {}).get('exchangeTimezoneName') or 'UTC'
+        df = pd.DataFrame({"ts": ts, "open": q.get("open"), "high": q.get("high"),
+                           "low": q.get("low"), "close": q.get("close"),
+                           "volume": q.get("volume")})
+        df = df.dropna(subset=["close"]).reset_index(drop=True)
+        if not len(df):
+            return pd.DataFrame()
+        loc = pd.to_datetime(df["ts"], unit="s", utc=True).dt.tz_convert(tz)
+        df["dt_local"] = loc.dt.strftime("%Y-%m-%d %H:%M")
+        df["trade_date"] = loc.dt.strftime("%Y-%m-%d")
+        return df[["ts", "dt_local", "trade_date",
+                   "open", "high", "low", "close", "volume"]]
+    except Exception as e:
+        log(f"  [intraday] {code} {interval}: {type(e).__name__}: {e}")
+        return pd.DataFrame()
+
+
+def _num(v):
+    return None if v is None or pd.isna(v) else float(v)
+
+
+def save_intraday_quotes(df, code, market, interval, data_source="yahoo"):
+    """分钟K线落库: INSERT OR REPLACE 按 UNIQUE(code, interval, ts)
+    返回 {'written': n, 'new': 新增ts数}(REPLACE覆盖不计new)"""
+    if df is None or not len(df):
+        return {'written': 0, 'new': 0}
+    conn = get_db()
+    create_intraday_table(conn)
+    have = {r[0] for r in conn.execute(
+        "SELECT ts FROM intraday_quotes WHERE code=? AND interval=?",
+        (code, interval))}
+    new = int(sum(1 for t in df["ts"] if t not in have))
+    written = 0
+    for _, row in df.iterrows():
+        conn.execute(
+            "INSERT OR REPLACE INTO intraday_quotes"
+            "(code, market, interval, ts, dt_local, trade_date, "
+            "open, high, low, close, volume, data_source) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+            (code, market, interval, int(row["ts"]), row["dt_local"],
+             row["trade_date"], _num(row["open"]), _num(row["high"]),
+             _num(row["low"]), _num(row["close"]), _num(row["volume"]),
+             data_source))
+        written += 1
+    conn.commit()
+    conn.close()
+    return {'written': written, 'new': new}
+
+
+def collect_intraday_quotes(code=None, market=None, intervals=None, days=None,
+                            log=print):
+    """分钟数据采集(池内全部活跃股/单股), 全程幂等:
+    days=None 各粒度按源窗口拉满(回填); 指定天数=增量(管道日常用 7)"""
+    intervals = tuple(intervals) if intervals else INTRADAY_INTERVALS
+    stocks = ([{'code': code, 'market': market}] if code and market
+              else get_stock_pool(active_only=True))
+    rep = {'stocks': len(stocks), 'intervals': list(intervals), 'rows': {}}
+    for s in stocks:
+        c, m = s['code'], s.get('market', 'A股')
+        for iv in intervals:
+            d = days or INTRADAY_BACKFILL_DAYS[iv]
+            df = fetch_yahoo_intraday(c, m, iv, d, log=log)
+            r = save_intraday_quotes(df, c, m, iv)
+            rep['rows'][f"{c}:{iv}"] = r
+            log(f"  [intraday] {c} {iv}: 写入{r['written']}根(新增{r['new']})")
+            time.sleep(1.0)  # 限速礼貌间隔(探测1.2s无封禁)
+    return rep
+
+
+def backfill_intraday_quotes(log=print):
+    """模块11 一次性回填: 池内全部活跃股 × 5m(60天) + 60m(730天) 拉满
+    (幂等; 新股全窗口种子由引导链第⑧步 _onboard_seed_intraday 负责)"""
+    return collect_intraday_quotes(log=log)
+
+
+def _onboard_seed_intraday(code, market):
+    """模块11 引导链⑧: 新股分钟数据全窗口种子(5m 60天 + 60m 730天)
+    (管道日常步只补7天 — 同 overlay 种子的定位, 防新股历史分钟永久缺失)"""
+    r = collect_intraday_quotes(code=code, market=market)
+    return r['rows']
+
+
+def get_intraday_status(active_only=True):
+    """分钟数据覆盖视图(Tab1): 每股×粒度 行数/起止; 读路径无DDL(sqlite_master探测)"""
+    conn = get_db()
+    stocks = get_stock_pool(active_only=active_only)
+    has = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
+                       "AND name='intraday_quotes'").fetchone()
+    rows = []
+    if has:
+        for s in stocks:
+            for iv in INTRADAY_INTERVALS:
+                r = conn.execute(
+                    "SELECT COUNT(*), MIN(trade_date), MAX(trade_date) "
+                    "FROM intraday_quotes WHERE code=? AND interval=?",
+                    (s['code'], iv)).fetchone()
+                rows.append({'code': s['code'], 'market': s['market'],
+                             'name': s.get('name', ''), 'interval': iv,
+                             'rows': r[0], 'start': r[1] or '—',
+                             'end': r[2] or '—'})
+    conn.close()
+    return {'rows': rows, 'table_exists': bool(has),
+            'caliber': '未复权(观察口径, 与日线qfq对齐留到分析层)'}
+
+
+def get_intraday_bars(code, trade_date, interval='60m'):
+    """读取某交易日的分钟K线(分析入口): 按ts升序的 dict 列表
+    (美股日期=纽约本地日期; 与日线/信号按 trade_date 关联)"""
+    conn = get_db()
+    has = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
+                       "AND name='intraday_quotes'").fetchone()
+    if not has:
+        conn.close()
+        return []
+    bars = [dict(r) for r in conn.execute(
+        "SELECT ts, dt_local, open, high, low, close, volume "
+        "FROM intraday_quotes WHERE code=? AND interval=? AND trade_date=? "
+        "ORDER BY ts", (code, interval, trade_date))]
+    conn.close()
+    return bars

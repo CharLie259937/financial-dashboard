@@ -401,7 +401,7 @@ _oc2 = qd._pipeline_onboard_check(log=lambda m: None)
 check("再次补课检查: 全部就绪无需补课", _oc2['checked'] == 0 and 'note' in _oc2)
 src = inspect.getsource(qd.run_daily_pipeline)
 _n_steps = src.count("step('")
-check("管道 9 步", _n_steps == 9, f"steps={_n_steps}")
+check("管道 10 步(模块11加入 intraday 分钟步)", _n_steps == 10, f"steps={_n_steps}")
 check("首步为 onboard_check(先补数后采集)",
       src.index("step('onboard_check'") < src.index("step('quotes'"))
 

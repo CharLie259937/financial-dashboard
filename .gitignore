@@ -28,6 +28,7 @@
 !test_module8.py
 !test_module9.py
 !test_module10.py
+!test_module11.py
 !test_d3_tab.py
 
 # --- docs ---
@@ -37,5 +38,6 @@
 !模块8开发计划.md
 !模块9开发计划.md
 !模块10开发计划.md
+!模块11开发计划.md
 !模块逻辑关系总览.md
 !经济日历数据源审计.md
