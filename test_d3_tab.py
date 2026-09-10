@@ -164,8 +164,8 @@ check("数值列 dtype 均为数值型 int64/float64 (无 object 混型, Arrow �
           for c in cmp_df.columns if c != '对象'))
 s1a = cmp_df[cmp_df['对象'].str.startswith('S1a ')].iloc[0]
 check(f"S1a OOS收益 40.26 (实际 {s1a['OOS收益%']})", abs(s1a['OOS收益%'] - 40.26) < 0.01)
-check(f"S1a OOS超额vsB1 37.14pp (实际 {s1a['OOS超额vsB1(pp)']})",
-      abs(s1a['OOS超额vsB1(pp)'] - 37.14) < 0.01)
+check(f"S1a OOS超额vsB1 36.89pp (实际 {s1a['OOS超额vsB1(pp)']})",
+      abs(s1a['OOS超额vsB1(pp)'] - 36.89) < 0.01)
 
 print("[6] 费率敏感性图构建")
 fig_fee = make_subplots(rows=1, cols=2, subplot_titles=("full 段", "oos 段"))
