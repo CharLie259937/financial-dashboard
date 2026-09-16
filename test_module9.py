@@ -269,8 +269,8 @@ print("[10] 每日管道集成(静态)")
 print("=" * 62)
 src_pipe = inspect.getsource(qd.run_daily_pipeline)
 check("管道含宏观采集步骤", "'macro'" in src_pipe)
-check("管道含封锁日台账步骤(守卫=完整性截断日)", "'overlay_days'" in src_pipe
-      and '_stock_cap_date()' in src_pipe)
+check("管道含封锁日台账步骤(守卫=已入库净值终点, 问题日志#8修正)",
+      "'overlay_days'" in src_pipe and '_forward_nav_max_date()' in src_pipe)
 
 print("\n" + "=" * 62)
 print("[11] 读路径无DDL(锁问题回归防护, 问题日志#1/#3)")

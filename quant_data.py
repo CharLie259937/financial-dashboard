@@ -4497,9 +4497,11 @@ def run_daily_pipeline(log=print):
     _recent = [(datetime.strptime(_today, '%Y-%m-%d') - timedelta(days=i)
                 ).strftime('%Y-%m-%d') for i in range(MACRO_RECENT_REFRESH)]
     step('macro', lambda: collect_macro_events(_recent, log=log))
-    _cap = _stock_cap_date()
-    step('overlay_days', lambda: (refresh_overlay_days(min_date=_cap, log=log)
-                                  if _cap else {'skipped': '无行情截断日, 跳过台账刷新'}))
+    # 模块9问题日志#8(2026-09-16): 台账守卫锚点从行情截断日改为已入库净值终点——
+    # 事件方向在"数据终局后、净值入库前"窗口内到达时, 事件日封锁不再被永久跳过
+    _guard = _forward_nav_max_date() or _stock_cap_date()
+    step('overlay_days', lambda: (refresh_overlay_days(min_date=_guard, log=log)
+                                  if _guard else {'skipped': '无净值终点且无行情截断日, 跳过台账刷新'}))
     step('forward', lambda: run_forward_step(log=log))
     report['freshness'] = get_data_freshness()
     for s in report['freshness']['alerts']:
@@ -5276,6 +5278,24 @@ def _stock_cap_date():
         pool_args)]
     conn.close()
     return min([d for d in latest if d], default=None)
+
+
+def _forward_nav_max_date():
+    """前向净值已入库最大日期——台账追加守卫的正确锚点(问题日志#8)
+    语义边界是"已入库净值覆盖的日期永不回补封锁"(模块9计划 2.3#7), 行情截断日
+    只是其代理: 数据终局(截断日前移)与净值入库(前向步)之间存在窗口, 事件方向
+    迟到一天到达时锚截断日会把事件日封锁永久跳过(2026-09-15 S2M/S1aM 失配事故:
+    同一管道内 overlay 步先于 forward 步, 截断日=事件日 → 跳过 → 净值按未封锁
+    入库), 锚净值终点则保证"封锁先于净值入库"; 无净值记录时返回 None(管道侧
+    退回截断日, 与原行为一致)。读路径无 DDL(sqlite_master 探测, 坑25)"""
+    conn = get_db()
+    if not conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
+                        "AND name='forward_equity'").fetchone():
+        conn.close()
+        return None
+    r = conn.execute("SELECT MAX(trade_date) FROM forward_equity").fetchone()
+    conn.close()
+    return r[0] if r and r[0] else None
 
 
 def evaluate_overlay():
