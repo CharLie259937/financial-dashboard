@@ -2024,6 +2024,75 @@ def calc_all_indicators(df):
 # 被动信号检测
 # ============================================================
 
+# 信号采集瘦身 (数据减负): 2026-09-12 精简研究决策, 2026-09-15 落地。
+# 14 个方向子类 → 保留 5 个有策略消费者的子类; 8 个零消费者子类立即停采;
+# RSI24 超买随 S1e 前向裁决二期停采(观察身份未结束前继续采集)。
+# 口径: "停采" = live 扫描不再生成/入库; 历史行保留不删除(研究面可查);
+#       replay 路径继续全量生成(副本库重建/新股引导的可复现性不受影响)。
+# 红线检查: 全部停采子类无任何 BT_STRATEGIES/前向/观察名单消费者, 不触碰冻结面。
+SIGNAL_STREAMLINE = {
+    'decision_date': '2026-09-12',
+    'effective_date': '2026-09-15',
+    'keep': [
+        ('price_limit', '大跌'), ('boll_break', '跌破下轨'),
+        ('rsi_oversold', '超卖'), ('rsi24_oversold', '超卖'),
+        ('kdj_cross', '金叉'),
+    ],
+    'stopped': [   # 立即停采(零策略消费者); volume_surge 双向共 8 行
+        ('macd_cross', '金叉'), ('macd_cross', '死叉'),
+        ('kdj_cross', '死叉'), ('rsi_overbought', '超买'),
+        ('boll_break', '突破上轨'), ('price_limit', '大涨'),
+        ('volume_surge', '放量突破'),
+    ],
+    'phase2': [    # 二期停采: 随 S1e 前向裁决联动
+        ('rsi24_overbought', '超买'),
+    ],
+    'note': ('停采只影响增量采集, 历史信号保留; 信号表仅占全库 2.7%, '
+             '减负收益主要在研究面噪音与扫描耗时'),
+}
+_STOPPED_SIGNALS = {(t, s) for t, s in SIGNAL_STREAMLINE['stopped']}
+
+# 模块12 P0: S3 事件层事前整合预注册(优化清单 2026-09-15, 见 模块12开发计划.md)
+# meta-labeling 两层框架(López de Prado 2018 ch.3): L1=原版技术触发(不动),
+# L2=错杀三条件事件门控(只做减法, 与模块9 overlay 机制同构)。
+# P1 采集层(财报日历 E1/E2 双源)就绪前不启动前向计数 — 看板显示"预注册·待采集层"。
+S3_EVENT_PREREG = {
+    'registered': '2026-09-15',
+    'variants': [
+        {'strategy_id': 'S1aE', 'parent_id': 'S1a',
+         'name': '变体·大跌持有10日·事件门控'},
+        {'strategy_id': 'S2E', 'parent_id': 'S2',
+         'name': '变体·超跌反弹持有5日·事件门控'},
+    ],
+    'gate': [
+        ('C1', '事件空白', '触发日前5个交易日(含触发日)内该股无生效主动事件(分红)'),
+        ('C2', '技术超卖', '触发日 RSI14 < 30 (对S2E由触发集隐含, 实际门控由C1/C3承担)'),
+        ('C3', '财报远期', '下次财报日 − 触发日 ≥ 10 个交易日 (依赖P1财报日历)'),
+    ],
+    'adjudication': {
+        'min_trades': 20,
+        'rules': ('SxE各完成>=20笔前向交易后, 与原版并行对照: '
+                  '超额vs B1<=0 → 淘汰建议; 超额>0但<=原版 → 无增量淘汰; '
+                  '超额>0且>原版且胜率>=原版 → 转正候选; 其余继续观察'),
+        'freeze_note': ('裁决规则预注册于 2026-09-15(模块12开发计划.md 三), '
+                        '不得依前向结果修改(与回测冻结协议同源)'),
+    },
+    'phase2': '量价确认(缩量/放量分层)为候选第4条, 一期不启用; 仓位放大系数二期单独预注册',
+    'data_prereq': ('财报日历 E1/E2 双源一致率>=95% 或单源抽样20条人工核对通过; '
+                    '验收当日登记前向计数起点, 起点前触发不入样本'),
+    'doc': '模块12开发计划.md',
+}
+
+
+def get_s3_prereg_cards():
+    """S1aE/S2E 预注册卡片(D1悬置假设区): P1采集层就绪前 n_trades=None 静态展示"""
+    return [{'strategy_id': v['strategy_id'], 'name': v['name'],
+             'note': f"S3预注册(模块12): {v['parent_id']}+事件门控, P1财报日历就绪后启动前向计数",
+             'n_trades': None, 'min_trades': 20,
+             'verdict': '🔵 预注册·待采集层'}
+            for v in S3_EVENT_PREREG['variants']]
+
+
 def detect_signals(df, code, market, name="", source="live"):
     signals = []
     if len(df) < 30:
@@ -2166,6 +2235,12 @@ def detect_signals(df, code, market, name="", source="live"):
                 'description': f"{'大涨' if direction=='bullish' else '大跌'} {curr['change_pct']:+.2f}%",
                 'trade_date': trade_date,
             })
+
+    # 数据减负(2026-09-15): live 扫描跳过停采子类(不入库不返回);
+    # replay 保持全量, 保证历史研究/副本库重建可复现
+    if source == 'live' and signals:
+        signals = [s for s in signals
+                   if (s['signal_type'], s['signal_subtype']) not in _STOPPED_SIGNALS]
 
     if signals:
         conn = get_db()
@@ -2780,6 +2855,8 @@ BT_STRATEGIES = {
 BT_KNOWLEDGE_CUTOFF = '2026-05-01'        # 知识截止日(样本内最后一天, 266信号日70%分位)
 BT_FREEZE_DATE = '2026-08-31'             # 参数冻结日
 BT_FEE_SENSITIVITY = [0.0, 0.001, 0.003]  # 费率敏感性档位(单边)
+# full段锚定 REPLAY_START(2026-09-15起, 问题日志#4): None 仅作占位,
+# run_d2_backtests/run_all_backtests 内部统一替换为 REPLAY_START
 BT_SEGMENTS = [('full', None), ('oos', BT_KNOWLEDGE_CUTOFF)]
 
 
@@ -2949,14 +3026,18 @@ def _run_strategy_bt(data, triggers, hold, max_pos=BT_MAX_POSITIONS, fee=BT_FEE,
             'open_positions': sum(1 for x in slot_busy if x is not None)}
 
 
-def _perf_metrics(equity, dates, trades=None, fund_util=None):
-    """统一绩效指标: 收益/风险/效率/交易/稳健"""
+def _perf_metrics(equity, dates, trades=None, fund_util=None, base=None):
+    """统一绩效指标: 收益/风险/效率/交易/稳健
+    base: 净值起点锚定值(默认 eq[0])。B1/B2 建仓日=日历首日时 eq[0] 为
+    建仓日收盘组合值≠1, total/annual 会漏掉建仓日 open→close 收益(问题日志#4),
+    两个基准须传 base=1.0(资金自段锚定日开盘 1.0 起步)"""
     eq = np.asarray(equity, dtype=float)
     n = len(eq)
     if n < 2:
         return {}
-    total = eq[-1] / eq[0] - 1
-    ann = (eq[-1] / eq[0]) ** (252 / max(n - 1, 1)) - 1
+    e0 = float(base) if base is not None else eq[0]
+    total = eq[-1] / e0 - 1
+    ann = (eq[-1] / e0) ** (252 / max(n - 1, 1)) - 1
     daily = np.diff(eq) / eq[:-1]
     vol = float(np.std(daily, ddof=1) * np.sqrt(252)) if n > 2 else None
     sharpe = ann / vol if vol and vol > 0 else None
@@ -2967,7 +3048,7 @@ def _perf_metrics(equity, dates, trades=None, fund_util=None):
     mdd_start = int(np.argmax(eq[:mdd_end + 1])) if mdd_end > 0 else 0
     day_win = float((daily > 0).mean())
     half = n // 2
-    ann_1 = (eq[half] / eq[0]) ** (252 / max(half, 1)) - 1
+    ann_1 = (eq[half] / e0) ** (252 / max(half, 1)) - 1
     ann_2 = (eq[-1] / eq[half]) ** (252 / max(n - 1 - half, 1)) - 1
     m = {
         'total_return': round(total, 6), 'annual_return': round(ann, 6),
@@ -2997,7 +3078,10 @@ def _perf_metrics(equity, dates, trades=None, fund_util=None):
 
 def _buy_hold_baseline(data, start_date=None):
     """B1 买入持有基准: 各股以开盘价建仓后不动, 等权1/N, 休市沿用前值
-    start_date(oos段)=知识截止日: 各股在其自身首个 >start_date 交易日再建仓"""
+    start_date=段锚定日; None 时锚定 REPLAY_START(2026-09-15起, 问题日志#4:
+    旧版 None=特征库起点建仓, 与信号窗口错位致 excess_vs_bh 系统性失真)"""
+    if start_date is None:
+        start_date = REPLAY_START
     codes = sorted(data['stocks'].keys())
     if not codes:
         return []
@@ -3005,11 +3089,8 @@ def _buy_hold_baseline(data, start_date=None):
     entry_idx = {}
     for c in codes:
         st = data['stocks'][c]
-        if start_date is None:
-            entry_idx[c] = 0
-        else:
-            entry_idx[c] = next((i for i, d in enumerate(st['dates'])
-                                 if d > start_date), None)
+        entry_idx[c] = next((i for i, d in enumerate(st['dates'])
+                             if d > start_date), None)
     ratio = {c: None for c in codes}
     equity = []
     for d in data['calendar']:
@@ -3047,8 +3128,8 @@ def _index_baseline(data):
 def run_backtest(strategy_id, max_pos=BT_MAX_POSITIONS, fee=BT_FEE,
                  data=None, start_date=None, blocked_days=None):
     """单策略回测入口(不写库, 供批量执行与看板调用)
-    start_date(oos段)=知识截止日: 仅统计 trade_date > start_date 的触发,
-    日历截取至该日之后, 净值从 1 重起
+    start_date=段锚定日(oos段=知识截止日; full段=REPLAY_START): 仅统计
+    trade_date > start_date 的触发, 日历截取至该日之后, 净值从 1 重起
     blocked_days(模块9): overlay 策略未显式传入时自动从台账加载"""
     data = data if data is not None else _load_backtest_data()
     if start_date is not None:
@@ -3073,26 +3154,27 @@ def run_backtest(strategy_id, max_pos=BT_MAX_POSITIONS, fee=BT_FEE,
 def run_all_backtests(max_pos=BT_MAX_POSITIONS, fee=BT_FEE,
                       start_date=None, data=None):
     """批量执行: 全部策略 + B1/B2 双基准(不写库)
-    start_date(oos段)=知识截止日: 触发/日历/净值截取至该日之后, 基准同窗口重算"""
+    start_date(oos段)=知识截止日: 触发/日历/净值截取至该日之后, 基准同窗口重算;
+    start_date=None(full段, 2026-09-15起)锚定REPLAY_START, 与run_d2_backtests同口径"""
     data = data if data is not None else _load_backtest_data()
-    if start_date is not None:
-        data = _filter_bt_data(data, start_date)
+    anchor = start_date if start_date is not None else REPLAY_START
+    seg_data = _filter_bt_data(data, anchor)
     strategies = {}
     for sid in BT_STRATEGIES:
-        strategies[sid] = run_backtest(sid, max_pos, fee, data, start_date)
-    bh_eq = _buy_hold_baseline(data, start_date)
-    idx_eq = _index_baseline(data)
+        strategies[sid] = run_backtest(sid, max_pos, fee, data, anchor)
+    bh_eq = _buy_hold_baseline(seg_data, anchor)
+    idx_eq = _index_baseline(seg_data)
     baselines = {
         'B1': {'name': '基准·买入持有等权',
                'equity': bh_eq,
-               'metrics': _perf_metrics(bh_eq, data['calendar'])},
+               'metrics': _perf_metrics(bh_eq, seg_data['calendar'], base=1.0)},
         'B2': {'name': '基准·大盘指数等权',
                'equity': idx_eq,
-               'metrics': _perf_metrics(idx_eq, data['calendar'])},
+               'metrics': _perf_metrics(idx_eq, seg_data['calendar'], base=1.0)},
     }
     return {
-        'range': {'start': data['calendar'][0], 'end': data['calendar'][-1],
-                  'n_days': len(data['calendar']), 'n_stocks': len(data['stocks'])},
+        'range': {'start': seg_data['calendar'][0], 'end': seg_data['calendar'][-1],
+                  'n_days': len(seg_data['calendar']), 'n_stocks': len(data['stocks'])},
         'params': {'max_positions': max_pos, 'fee': fee},
         'segment': 'oos' if start_date is not None else 'full',
         'strategies': strategies, 'baselines': baselines,
@@ -3705,6 +3787,14 @@ def _d2_protocol_json():
             'full': '工程验证栏: 验证T+1成交/K槽位/费率/跳空成本等实现机制, 收益仅作机制对照, 不作业绩证据',
             'oos': '证据参考栏: 净值从1重起, 对照同窗口重算的B1/B2, 供第二阶段特征池取舍',
         },
+        'full_anchor': {
+            'version': 'v2 (2026-09-15)',
+            'rule': f'full段日历与B1/B2基准统一锚定REPLAY_START={REPLAY_START}(问题日志#4)',
+            'v1_defect': ('v1(2026-09-10冻结批次及以前): B1/B2从特征库起点2018-06-18建仓, '
+                          '而策略信号自2021-01-04才存在, 预热段行情只计入基准不计入策略, '
+                          'excess_vs_bh系统性失真(对照组低估约560pp, 原始3股低估约510pp, '
+                          '全池反向高估约780pp); 跨批次对比full段excess时须校准口径'),
+        },
         'freeze_rule': ('冻结日后禁止依回测结果回头调整参数/池标准/策略定义; '
                         '问题记观察名单, 由forward样本裁决'),
         'append_rule': 'forward run 以 run_date 追加式入库, 禁止UPDATE已入库的full/oos结果',
@@ -3713,7 +3803,8 @@ def _d2_protocol_json():
         'overlay_note': ('S2M/S1aM(模块9) = 原策略+宏观封锁日不开新仓(只做减法); '
                          'overlay家族经FDR(q=0.05分层BH)选出, 研究窗口含知识截止后数据, '
                          '故 full/oos 两段均为机制对照(选择泄漏), 唯一裁决=forward test'),
-        'baselines': {'B1': '买入持有等权(各股自身首个回测日开盘建仓, oos段在截止日后首个交易日再建仓)',
+        'baselines': {'B1': ('买入持有等权(各股在段锚定日后首个交易日开盘建仓: '
+                             'full段=REPLAY_START后首日, oos段=知识截止日后首日; 2026-09-15起)'),
                       'B2': '三市场指数等权日收益合成(休市日贡献0)'},
     }
 
@@ -3795,15 +3886,21 @@ def run_d2_backtests():
         return run_id
 
     for seg, start_date in BT_SEGMENTS:
-        seg_data = _filter_bt_data(data, start_date) if start_date else data
+        # 基准窗口对齐(问题日志#4, 2026-09-15): full段锚定REPLAY_START——
+        # 信号只自REPLAY_START存在, B1若从特征库起点(2018-06-18)建仓, 会把策略
+        # 无法参与的预热段行情计入基准, excess_vs_bh 系统性失真(量级约±500pp)
+        seg_anchor = start_date if start_date else REPLAY_START
+        seg_data = _filter_bt_data(data, seg_anchor)
+        assert seg_data['calendar'] and seg_data['calendar'][0] > REPLAY_START, \
+            f"{seg}段日历起点须晚于REPLAY_START({REPLAY_START}), 基准窗口对齐被破坏"
         cal = seg_data['calendar']
-        bh_eq = _buy_hold_baseline(seg_data, start_date)
+        bh_eq = _buy_hold_baseline(seg_data, seg_anchor)
         idx_eq = _index_baseline(seg_data)
         baselines = {
             'B1': {'name': '基准·买入持有等权', 'equity': bh_eq,
-                   'metrics': _perf_metrics(bh_eq, cal)},
+                   'metrics': _perf_metrics(bh_eq, cal, base=1.0)},
             'B2': {'name': '基准·大盘指数等权', 'equity': idx_eq,
-                   'metrics': _perf_metrics(idx_eq, cal)},
+                   'metrics': _perf_metrics(idx_eq, cal, base=1.0)},
         }
         bh_total = baselines['B1']['metrics']['total_return']
         idx_total = baselines['B2']['metrics']['total_return']
@@ -3818,7 +3915,7 @@ def run_d2_backtests():
         fee0 = {}
         for sid, spec in BT_STRATEGIES.items():
             for fee in BT_FEE_SENSITIVITY:
-                res = run_backtest(sid, BT_MAX_POSITIONS, fee, data, start_date,
+                res = run_backtest(sid, BT_MAX_POSITIONS, fee, data, seg_anchor,
                                    blocked_days=overlay_blocked)
                 if fee == 0.0:
                     fee0[sid] = res
@@ -4211,8 +4308,163 @@ def get_data_freshness():
     macro_latest = conn.execute("SELECT MAX(trade_date) FROM macro_events").fetchone()[0]
     conn.close()
     return {'stocks': stocks, 'benchmark': benchmark, 'macro_latest': macro_latest,
-            'alerts': [s for s in stocks if s['alert']],
-            'threshold': FORWARD_FRESHNESS_ALERT}
+            'alerts': [s for s in stocks if s['alert']], 'threshold': FORWARD_FRESHNESS_ALERT}
+
+
+def get_signal_streamline_view():
+    """数据减负视图(纯读): 各信号子类采集状态 / 策略消费者 / 历史触发量 / 最近触发
+    停采子类在生效日后不应再有 live 来源新行(重放补历史除外)"""
+    conn = get_db()
+    rows = [dict(r) for r in conn.execute(
+        "SELECT signal_type, signal_subtype, direction, COUNT(*) AS n_total, "
+        "SUM(CASE WHEN source='live' THEN 1 ELSE 0 END) AS n_live, "
+        "MAX(trade_date) AS last_trigger "
+        "FROM passive_signals GROUP BY signal_type, signal_subtype, direction "
+        "ORDER BY signal_type, signal_subtype, direction")]
+    conn.close()
+
+    keep = {tuple(x) for x in SIGNAL_STREAMLINE['keep']}
+    stopped = {tuple(x) for x in SIGNAL_STREAMLINE['stopped']}
+    phase2 = {tuple(x) for x in SIGNAL_STREAMLINE['phase2']}
+    # 消费者映射: (type, subtype) -> 引用它的策略(overlay 变体随原版)
+    consumers = {}
+    for sid, s in BT_STRATEGIES.items():
+        for m in s['match']:
+            consumers.setdefault(tuple(m), []).append(sid)
+
+    out = []
+    for r in rows:
+        key = (r['signal_type'], r['signal_subtype'])
+        if key in keep:
+            status = '🟢 采集中'
+        elif key in stopped:
+            status = '⛔ 已停采'
+        elif key in phase2:
+            status = '🟡 二期停采(随S1e裁决)'
+        else:
+            status = '⚠️ 未注册(需核查)'
+        out.append({
+            'signal_type': r['signal_type'], 'signal_subtype': r['signal_subtype'],
+            'direction': r['direction'], 'status': status,
+            'consumers': '、'.join(sorted(set(consumers.get(key, [])))) or '—(零消费者)',
+            'n_total': r['n_total'], 'n_live': r['n_live'],
+            'last_trigger': r['last_trigger'],
+        })
+    eff = SIGNAL_STREAMLINE['effective_date']
+    n_stopped_new = 0
+    if out:
+        conn = get_db()
+        n_stopped_new = conn.execute(
+            f"SELECT COUNT(*) FROM passive_signals WHERE source='live' "
+            f"AND trade_date >= ? AND signal_type || '/' || signal_subtype IN "
+            f"({','.join('?' * len(stopped))})",
+            (eff,) + tuple(f"{t}/{s}" for t, s in stopped)).fetchone()[0]
+        conn.close()
+    return {'rows': out,
+            'summary': {'keep': len(keep), 'stopped': len(stopped),
+                        'phase2': len(phase2), 'decision': SIGNAL_STREAMLINE['decision_date'],
+                        'effective': eff, 'post_stop_live_rows': n_stopped_new,
+                        'note': SIGNAL_STREAMLINE['note']}}
+
+
+def get_signal_decay_view(window=120, min_triggers=20):
+    """S2 信号衰减监控(优化清单 2026-09-14, 仅监控展示不干预):
+    滚动 window 个交易日的信号家族胜率 vs 全日随机基准差序列(pp),
+    外加"同日多股触发占比"拥挤度代理。
+    口径: 信号日收盘计价、持有 H 日收盘对收盘(与模块3信号口径一致, 非引擎 T+1 口径);
+    家族 = BT_STRATEGIES 非 overlay 成员; 尾部不足 H 日的触发丢弃(未终局不计)。"""
+    conn = get_db()
+    pool_f, pool_args = _pool_sql_filter(_pool_code_set())
+    # 收盘矩阵: {code: [(date, close)]}
+    stocks = {}
+    for r in conn.execute(
+            f"SELECT code, trade_date, close FROM daily_feature_base "
+            f"WHERE {pool_f} AND close IS NOT NULL ORDER BY code, trade_date",
+            pool_args).fetchall():
+        stocks.setdefault(r['code'], []).append((r['trade_date'], r['close']))
+    # 日级触发集(live+replay, 同股同日同子类去重)
+    sigs = set()
+    for r in conn.execute(
+            f"SELECT DISTINCT code, trade_date, signal_type, signal_subtype "
+            f"FROM passive_signals WHERE {pool_f}", pool_args).fetchall():
+        sigs.add((r['code'], r['trade_date'], r['signal_type'], r['signal_subtype']))
+    conn.close()
+    if not stocks:
+        return {'window': window, 'families': {}, 'crowding': [], 'meta': {'error': '无池内行情'}}
+
+    cal = sorted({d for s in stocks.values() for d, _ in s})
+
+    families = {}
+    for sid, s in BT_STRATEGIES.items():
+        if s.get('overlay'):
+            continue
+        families[sid] = {'name': s['name'], 'hold': s['hold'],
+                         'match': {tuple(m) for m in s['match']}}
+
+    # 每家族逐笔评估 + 全日基准(收盘对收盘 H 日)
+    fam_eval = {sid: [] for sid in families}      # [(date, win01)]
+    base_eval = []                                 # [(date, win01)]
+    for code, series in stocks.items():
+        dates = [d for d, _ in series]
+        closes = [c for _, c in series]
+        pos = {d: i for i, d in enumerate(dates)}
+        fam_days = {sid: set() for sid in families}
+        for (c, d, t, st) in sigs:
+            if c != code or d not in pos:
+                continue
+            for sid, f in families.items():
+                if (t, st) in f['match']:
+                    fam_days[sid].add(d)
+        for sid in families:
+            for d in fam_days[sid]:
+                i, h = pos[d], families[sid]['hold']
+                if i + h < len(closes):
+                    fam_eval[sid].append((d, closes[i + h] / closes[i] - 1 > 0))
+        h_common = 5
+        for i in range(len(closes) - h_common):
+            base_eval.append((dates[i], closes[i + h_common] / closes[i] - 1 > 0))
+
+    # 同日多股触发(保留子类并集)拥挤度原料
+    keep_subtypes = {tuple(x) for x in SIGNAL_STREAMLINE['keep']}
+    day_codes = {}
+    for (c, d, t, st) in sigs:
+        if (t, st) in keep_subtypes:
+            day_codes.setdefault(d, set()).add(c)
+
+    out_fam = {}
+    for sid, f in families.items():
+        ev = fam_eval[sid]
+        series = []
+        for end in range(window - 1, len(cal)):
+            w = set(cal[end - window + 1:end + 1])
+            hits = [(d, w_) for d, w_ in ev if d in w]
+            bw = [w_ for d, w_ in base_eval if d in w]
+            if not hits or not bw:
+                continue
+            n, wins = len(hits), sum(1 for _, w_ in hits if w_)
+            wr, base_wr = wins / n, sum(bw) / len(bw)
+            series.append({'date': cal[end], 'n': n, 'win_rate': wr,
+                           'baseline': base_wr,
+                           'diff_pp': (wr - base_wr) * 100 if n >= min_triggers else None})
+        out_fam[sid] = {'name': f['name'], 'hold': f['hold'], 'series': series}
+
+    crowd = []
+    for end in range(window - 1, len(cal)):
+        w = cal[end - window + 1:end + 1]
+        counts = [len(day_codes.get(d, ())) for d in w]
+        trig_days = [c for c in counts if c > 0]
+        if not trig_days:
+            continue
+        crowd.append({'date': cal[end],
+                      'pct_multi': sum(1 for c in trig_days if c >= 2) / len(trig_days),
+                      'avg_codes': sum(trig_days) / len(trig_days)})
+
+    return {'window': window, 'min_triggers': min_triggers, 'families': out_fam,
+            'crowding': crowd,
+            'meta': {'caliber': '信号日收盘计价, 收盘对收盘持有H日; 随机基准=同窗口全日样本'
+                                '(H=5)正向胜率; 衰减判定交给前向样本, 本视图只呈现不裁决',
+                     'window_note': f'滚动 {window} 个交易日; n<{min_triggers} 的窗口 diff 置空',
+                     'n_days': len(cal), 'date_range': [cal[0], cal[-1]]}}
 
 
 def run_daily_pipeline(log=print):

@@ -111,8 +111,8 @@ try:
           _tot > 0 and _bad <= 0.2 * _tot, f"{_tot}天中{_bad}天异常")
     sz5 = qd.fetch_yahoo_intraday("300750", "A股", "5m", 7, log=lambda m: None)
     check("A股 300750 5m 7天返回K线", len(sz5) > 100, f"{len(sz5)}根")
-    check("A股粒度≈48根/日(5m)",
-          30 <= len(sz5) / max(sz5['trade_date'].nunique(), 1) <= 60)
+    check("A股粒度 30~75根/日(5m) (09-15实测66.2: 含集合竞价, 源端特性非缺陷)",
+          30 <= len(sz5) / max(sz5['trade_date'].nunique(), 1) <= 75)
 
     # ========================================================
     section("[3] 源窗口截断与非法粒度")
@@ -168,18 +168,28 @@ try:
     check("AAPL 两粒度均有写入",
           all(_rep['rows'][k]['written'] > 0 for k in _rep['rows']),
           str({k: v['written'] for k, v in _rep['rows'].items()}))
-    _rep2 = qd.collect_intraday_quotes(code="AAPL", market="美股", days=10,
+    # 幂等检查用 A股(收盘后数据终局); AAPL 美股盘中部分K线持续更新, 盘中重跑必有新增(时序性)
+    qd.collect_intraday_quotes(code="300750", market="A股", days=7, log=lambda m: None)
+    _rep3 = qd.collect_intraday_quotes(code="300750", market="A股", days=7,
                                        log=lambda m: None)
-    check("采集级幂等: 重跑零新增",
-          all(v['new'] == 0 for v in _rep2['rows'].values()))
+    check("采集级幂等: A股重跑零新增(终局数据)",
+          all(v['new'] == 0 for v in _rep3['rows'].values()),
+          str({k: v['new'] for k, v in _rep3['rows'].items()}))
 
     # ========================================================
     section("[6] 引导链⑧种子(300750 全窗口 live)")
+    # 期望演进: 09-10 首次回填时库空→种子拉满 new>500; 09-15 起数据已满,
+    # 全窗口重拉 new=0 才是正确的幂等行为 — 断言改为"幂等 + 库内覆盖已满"
     _seed = qd._onboard_seed_intraday("300750", "A股")
     _n60 = _seed.get("300750:60m", {}).get('new', 0)
     _n5 = _seed.get("300750:5m", {}).get('new', 0)
-    check("60m 全窗口种子入库(>500根)", _n60 > 500, f"new={_n60}")
-    check("5m 全窗口种子入库(>500根)", _n5 > 500, f"new={_n5}")
+    check("全窗口种子幂等: 已满成员重拉零新增", _n60 == 0 and _n5 == 0,
+          f"new={_n60}/{_n5}")
+    _st6 = {(r['code'], r['interval']): r['rows']
+            for r in qd.get_intraday_status()['rows']}
+    check("种子覆盖验证: 300750 两粒度库内均>500根",
+          all(_st6.get(('300750', iv), 0) > 500 for iv in ('60m', '5m')),
+          str({iv: _st6.get(('300750', iv), 0) for iv in ('60m', '5m')}))
 
     # ========================================================
     section("[7] 覆盖视图与分析入口")

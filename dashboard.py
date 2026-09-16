@@ -3309,8 +3309,14 @@ elif page == "量化分析":
         except Exception as e:
             st.error(f"新鲜度读取失败: {e}")
 
-        # ---------- ③ 裁决面板 ----------
+        # ---------- ③ 裁决面板 + D1 悬置假设进度卡片 ----------
         st.markdown("**③ 观察名单裁决**（规则已预注册于 forward_meta.protocol，不随结果调整）")
+        # 前向视图提前加载(④⑤⑥⑨与D1卡片共用, 单次读取)
+        try:
+            _view = quant_data.get_forward_view()
+        except Exception as e:
+            st.error(f"前向视图读取失败: {e}")
+            _view = {'equity': {}, 'trades': [], 'status': {}, 'protocol': None}
         try:
             _wl = quant_data.evaluate_watchlist()
             st.dataframe(pd.DataFrame([{
@@ -3320,6 +3326,36 @@ elif page == "量化分析":
                 "超额(vs B1)": f"{w['excess_vs_b1']:+.2%}" if w['excess_vs_b1'] is not None else "—",
                 "当前裁决": w['verdict'],
             } for w in _wl]), use_container_width=True, hide_index=True)
+
+            # D1 悬置假设进度卡片(优化清单 2026-09-14): 把"继续观察"从静态标签变成可追踪进度
+            _adj = (_view.get('protocol') or {}).get('adjudication') or {}
+            _cards = list(_wl)
+            try:
+                _cards += quant_data.evaluate_overlay()
+            except Exception:
+                pass
+            _cards.append({'strategy_id': 'S2Q', 'name': '假设·大跌在场=高质量超卖',
+                           'note': '冻结观察名单假设(组合构成研究, 非运行策略)',
+                           'n_trades': None, 'min_trades': 20,
+                           'verdict': '🟡 前向样本裁决中'})
+            # S3 预注册变体卡片(模块12 P0, 2026-09-15): P1财报日历就绪前静态展示
+            _cards += quant_data.get_s3_prereg_cards()
+            st.markdown("**悬置假设进度卡片**（D1 · 完成 20 笔交易后裁决；规则回读见表下）")
+            _wl_extra = {w['strategy_id']: w for w in _wl}
+            _cols = st.columns(3)
+            for _i, _c in enumerate(_cards):
+                with _cols[_i % 3]:
+                    _nt, _mt = _c.get('n_trades'), _c.get('min_trades', 20)
+                    _pct = (min(_nt / _mt, 1.0) if _nt is not None else 0.0)
+                    _prog_txt = (f"{_c['strategy_id']} {_nt}/{_mt}"
+                                 if _nt is not None else f"{_c['strategy_id']} 假设观察")
+                    st.progress(_pct, text=f"{_prog_txt} · {_c.get('verdict', '—')}")
+                    _wm = _wl_extra.get(_c.get('strategy_id'))
+                    _extra = (f"前向超额 {_wm['excess_vs_b1']:+.2%}"
+                              if _wm and _wm['excess_vs_b1'] is not None
+                              else _c.get('note', ''))
+                    st.caption(f"{_c['name']} · {_extra}" if _extra else _c['name'])
+            st.caption(f"裁决规则回读（预注册于 {_adj.get('min_trades', 20)} 笔门槛）：{_adj.get('rules', '协议未生成（首次前向步进时写入）')}")
         except Exception as e:
             st.error(f"裁决面板读取失败: {e}")
 
@@ -3381,14 +3417,7 @@ elif page == "量化分析":
         except Exception as e:
             st.error(f"池构成面板读取失败: {e}")
 
-        # ---------- 前向视图 ----------
-        try:
-            _view = quant_data.get_forward_view()
-        except Exception as e:
-            st.error(f"前向视图读取失败: {e}")
-            _view = {'equity': {}, 'trades': [], 'status': {}, 'protocol': None}
-
-        # ④ 净值曲线
+        # ---------- ④ 净值曲线 ----------
         st.markdown("**④ 前向净值曲线**（策略 vs B1 等权买入持有 / B2 指数基准）")
         if _view['equity']:
             fig_fwd = go.Figure()
@@ -3460,8 +3489,76 @@ elif page == "量化分析":
         else:
             st.info("前向窗口暂无已完成交易")
 
-        # ⑦ 协议
-        with st.expander("**⑦ 前向协议（预注册，冻结）**", expanded=False):
+        # ---------- ⑦ 信号衰减监控 (S2 · 优化清单 2026-09-14) ----------
+        st.markdown("**⑦ 信号衰减监控**（S2 · 滚动 120 日窗口：信号家族胜率 − 全日随机基准；"
+                    "仅监控展示，衰减与否的裁决权在前向样本）")
+        try:
+            _decay = quant_data.get_signal_decay_view()
+            if _decay.get('families'):
+                fig_dc = go.Figure()
+                for _sid, _f in _decay['families'].items():
+                    _pts = [(x['date'], x['diff_pp']) for x in _f['series']
+                            if x['diff_pp'] is not None]
+                    if not _pts:
+                        continue
+                    fig_dc.add_trace(go.Scatter(
+                        x=[p[0] for p in _pts], y=[p[1] for p in _pts], mode='lines',
+                        name=f"{_sid}(持有{_f['hold']}日)", line=dict(width=2)))
+                if fig_dc.data:
+                    fig_dc.add_hline(y=0, line=dict(color="#7F7F7F", width=1, dash="dash"))
+                    fig_dc.update_layout(
+                        height=340, margin=dict(l=10, r=10, t=30, b=10),
+                        yaxis_title="胜率差 (pp)", legend=dict(orientation="h", y=1.14),
+                        hovermode="x unified")
+                    st.plotly_chart(fig_dc, use_container_width=True)
+                else:
+                    st.info("窗口内触发数不足（n<20），暂无可呈现的衰减序列")
+                # 拥挤度代理: 同日多股触发占比
+                _cr = _decay.get('crowding') or []
+                if _cr:
+                    _cc1, _cc2, _cc3 = st.columns(3)
+                    _last_cr = _cr[-1]
+                    _cc1.metric("多股同日触发占比(最新窗口)",
+                                f"{_last_cr['pct_multi']:.1%}")
+                    _cc2.metric("触发日日均触发股数", f"{_last_cr['avg_codes']:.2f}")
+                    _cc3.metric("监控窗口", f"{_decay['window']} 交易日")
+                    st.caption(
+                        f"拥挤度代理 = 保留子类并集的日级触发；日历 {_decay['meta']['date_range'][0]} ~ "
+                        f"{_decay['meta']['date_range'][1]}。{_decay['meta']['caliber']}")
+            else:
+                st.info("暂无池内行情数据，无法计算衰减序列")
+        except Exception as e:
+            st.error(f"衰减监控读取失败: {e}")
+
+        # ---------- ⑧ 信号采集瘦身 (数据减负 · 2026-09-12 决策) ----------
+        try:
+            _sl = quant_data.get_signal_streamline_view()
+            st.markdown("**⑧ 信号采集瘦身**（数据减负 · "
+                        f"{_sl['summary']['decision']} 决策，{_sl['summary']['effective']} 生效："
+                        f"保留 {_sl['summary']['keep']} 个子类，停采 "
+                        f"{_sl['summary']['stopped']} 项（零策略消费者），"
+                        f"{_sl['summary']['phase2']} 项二期随 S1e 裁决停采）")
+            _sl_df = pd.DataFrame([{
+                "状态": r['status'], "信号类型": r['signal_type'],
+                "子类": r['signal_subtype'], "方向": r['direction'],
+                "策略消费者": r['consumers'], "历史触发": r['n_total'],
+                "live触发": r['n_live'], "最近触发": r['last_trigger'],
+            } for r in _sl['rows']])
+            st.dataframe(_sl_df, use_container_width=True, hide_index=True)
+            _post = _sl['summary']['post_stop_live_rows']
+            if _post:
+                st.warning(f"停采生效日后仍有 {_post} 条停采类 live 新增（生效时点前采集，"
+                           "属预期；此后 live 扫描不再产生）")
+            st.caption(
+                "停采口径：live 扫描不再生成/入库；历史行保留供研究（信号表仅占全库 2.7%，"
+                "减负收益主要在研究面噪音与扫描耗时）；replay 路径保持全量生成，"
+                "保证历史研究与副本库重建可复现。全部停采子类无任何策略/前向/观察名单消费者，"
+                "不触碰冻结协议。")
+        except Exception as e:
+            st.error(f"采集瘦身视图读取失败: {e}")
+
+        # ---------- ⑨ 协议 ----------
+        with st.expander("**⑨ 前向协议（预注册，冻结）**", expanded=False):
             if _view.get('protocol'):
                 st.json(_view['protocol'])
             else:
