@@ -2085,12 +2085,496 @@ S3_EVENT_PREREG = {
 
 
 def get_s3_prereg_cards():
-    """S1aE/S2E 预注册卡片(D1悬置假设区): P1采集层就绪前 n_trades=None 静态展示"""
+    """S1aE/S2E 预注册卡片(D1悬置假设区): P1前静态展示; P1验收后读 s3_event_protocol 显示计数起点"""
+    conn = get_db()
+    reg = None
+    try:
+        r = conn.execute("SELECT result_json FROM forward_meta WHERE meta_key='s3_event_protocol' "
+                         "ORDER BY id DESC LIMIT 1").fetchone()
+        if r:
+            reg = json.loads(r[0])
+    except sqlite3.OperationalError:
+        pass                      # forward_meta 未建(首次前向步进前), 按未登记展示
+    finally:
+        conn.close()
+    if reg:
+        note = (f"S3预注册(模块12): 事件门控变体, 采集层就绪, 前向计数起点 "
+                f"{reg.get('forward_count_start')}, 起点前触发不入样本")
+        verdict = "🔵 预注册·采集层就绪·待P2引擎接入"
+    else:
+        note = "S3预注册(模块12): 事件门控变体, P1财报日历就绪后启动前向计数"
+        verdict = "🔵 预注册·待采集层"
     return [{'strategy_id': v['strategy_id'], 'name': v['name'],
-             'note': f"S3预注册(模块12): {v['parent_id']}+事件门控, P1财报日历就绪后启动前向计数",
-             'n_trades': None, 'min_trades': 20,
-             'verdict': '🔵 预注册·待采集层'}
+             'note': note, 'n_trades': None, 'min_trades': 20,
+             'verdict': verdict}
             for v in S3_EVENT_PREREG['variants']]
+
+
+# ============================================================
+# 模块12 P1: 财报日历采集层 E1/E2 (2026-09-16)
+# E1=财报披露日(真披露日语义——区别于报告期, S3 删除根因即坑15)
+# E2=结构化公告(关键词分类配置驱动, 未匹配落 unclassified 供人工复核)
+# 源矩阵: A/H=东财公告流 np-anotice-stock(翻页, 全量入库按规则分类);
+#         US=SEC EDGAR submissions(仅8-K; items含2.02=财报发布E1, 其余按item码E2);
+#         交叉源+未来排期=百度 sapi report_time(精确code匹配, 预约可能变更)
+# 双源一致率(P1验收闸门): 主源E1日期在百度report_time当日清单精确code命中
+# ============================================================
+EM_NOTICE_API = "https://np-anotice-stock.eastmoney.com/api/security/ann"
+E1_ANN_PAGES = 14               # 东财公告流翻页上限(100条/页, A股≈4年/港股≈3.5年)
+E1_AGREEMENT_DATES = 30         # 交叉验证抽样日期数(主源最近E1日期)
+E1_FUTURE_SCAN_DAYS = 75        # 百度预约排期前向扫描天数(C3 下次财报日)
+E1_TRIG = {                     # E1 触发模式(连续子串, 简繁双写法)
+    'A股': ('年度报告', '半年度报告', '第一季度报告', '一季度报告',
+            '第三季度报告', '三季度报告'),
+    '港股': ('业绩公布', '業績公布', '业绩公告', '業績公告'),
+}
+E1_SUBTYPE_RULES = [            # E1 报告期归类(顺序敏感: 半年度先于年度, 六个月先于三个月)
+    ('半年度', 'interim'), ('中期', 'interim'), ('六个月', 'interim'), ('六個月', 'interim'),
+    ('年度', 'annual'), ('全年', 'annual'),
+    ('三季度', 'q3'), ('第三季度', 'q3'), ('九个月', 'q3'), ('九個月', 'q3'),
+    ('一季度', 'q1'), ('第一季度', 'q1'), ('三个月', 'q1'), ('三個月', 'q1'),
+]
+E2_CLASSIFY_RULES = [           # E2 关键词分类配置(顺序敏感, 简繁双写法, 未命中=unclassified)
+    ('配售', '配售'),
+    ('要約收购', '收购'), ('要约收购', '收购'), ('收购', '收购'), ('收購', '收购'),
+    ('併購', '收购'), ('并购', '收购'),
+    ('回购', '回购'), ('回購', '回购'), ('购回', '回购'), ('購回', '回购'),
+    ('解禁', '解禁'),
+    ('澄清', '澄清'),
+    ('增持', '增减持'), ('减持', '增减持'), ('減持', '增减持'),
+]
+EDGAR_SUBMIT_API = "https://data.sec.gov/submissions/CIK{cik}.json"
+EDGAR_UA = {'User-Agent': 'Research QuantDashboard zhihuidev@example.com',
+            'Accept-Encoding': 'gzip, deflate'}
+EDGAR_CIK = {'AAPL': '0000320193', 'SNDK': '0002023554'}   # SNDK=2025分拆后新主体
+EDGAR_ITEM_CLASS = {            # 8-K item 码 → E2 子类(其余 unclassified)
+    '1.01': '重大协议', '1.02': '协议终止', '2.01': '完成收购处置', '2.03': '直接债务',
+    '3.01': '退市通知', '3.03': '证券权利修改', '4.01': '审计变更',
+    '5.01': '控制权变更', '5.02': '高管董事变动', '5.03': '章程修改',
+    '8.01': '其他重大事件',
+}
+
+
+def _e1_subtype(title):
+    """财报标题 → 报告期子类(annual/interim/q1/q3), 顺序敏感"""
+    for kw, sub in E1_SUBTYPE_RULES:
+        if kw in title:
+            return sub
+    return 'earnings'
+
+
+def _e2_classify(title):
+    """公告标题 → E2 子类(配置驱动), 未命中 unclassified"""
+    for kw, sub in E2_CLASSIFY_RULES:
+        if kw in title:
+            return sub
+    return 'unclassified'
+
+
+def _to_et(dt_utc):
+    """UTC datetime → 美东本地 datetime(自实现 DST: 3月第2个周日02:00 ~ 11月第1个周日02:00
+    本地时切换, 先按EST假设再校正; 不依赖 tzdata——Windows 无系统时区库)"""
+    y = dt_utc.year
+    m1 = datetime(y, 3, 1)
+    d1 = m1 + timedelta(days=(6 - m1.weekday()) % 7 + 7) + timedelta(hours=2)
+    n1 = datetime(y, 11, 1)
+    d2 = n1 + timedelta(days=(6 - n1.weekday()) % 7) + timedelta(hours=2)
+    est = dt_utc - timedelta(hours=5)
+    if d1 <= est < d2:
+        return dt_utc - timedelta(hours=4)
+    return est
+
+
+def _edgar_timing(accept_ts):
+    """EDGAR acceptanceDateTime → 盘前/盘中/盘后(美东 9:30/16:00 界)"""
+    if not accept_ts:
+        return '未知'
+    try:
+        dt = datetime.fromisoformat(str(accept_ts).replace('Z', '+00:00')).replace(tzinfo=None)
+        et = _to_et(dt)
+        m = et.hour * 60 + et.minute
+        if m < 9 * 60 + 30:
+            return '盘前'
+        if m <= 16 * 60:
+            return '盘中'
+        return '盘后'
+    except Exception:
+        return '未知'
+
+
+def _ec_dedup_key(code, event_date, source, event_class, subtype, period, title):
+    """幂等键: sha1(业务字段全拼接)——同日同源多条公告可共存(计划文档简化键的工程修正,
+    见 模块12开发计划.md P1 执行记录)"""
+    import hashlib
+    raw = "|".join([str(x or "") for x in
+                    (code, event_date, source, event_class, subtype, period, title)])
+    return hashlib.sha1(raw.encode('utf-8')).hexdigest()
+
+
+def create_earnings_tables(conn):
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS earnings_calendar(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            code TEXT NOT NULL, market TEXT NOT NULL, name TEXT,
+            event_class TEXT NOT NULL, event_date TEXT NOT NULL,
+            event_subtype TEXT NOT NULL, period TEXT, title TEXT,
+            timing TEXT, source TEXT NOT NULL, run_ts TEXT, run_date TEXT,
+            dedup_key TEXT NOT NULL UNIQUE
+        );
+        CREATE INDEX IF NOT EXISTS idx_ec_code_date
+            ON earnings_calendar(code, event_date);
+        CREATE TABLE IF NOT EXISTS earnings_collect_log(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_date TEXT NOT NULL, source TEXT NOT NULL, code TEXT,
+            status TEXT NOT NULL, n_new INTEGER, n_seen INTEGER,
+            note TEXT, run_ts TEXT
+        );
+    """)
+    conn.commit()
+
+
+def _fetch_em_notices(code, ann_type, max_pages=E1_ANN_PAGES, log=print):
+    """东财公告流翻页(100条/页): 返回去重排序的 [(notice_date, title)]"""
+    rows = []
+    for pg in range(1, max_pages + 1):
+        r = _session.get(EM_NOTICE_API, params={
+            'sr': '-1', 'page_size': '100', 'page_index': str(pg),
+            'ann_type': ann_type, 'stock_list': code}, timeout=25)
+        r.raise_for_status()
+        lst = (r.json().get('data') or {}).get('list') or []
+        if not lst:
+            break
+        for a in lst:
+            d = str(a.get('notice_date'))[:10]
+            t = str(a.get('title') or '').strip()
+            if d and t:
+                rows.append((d, t))
+        if len(lst) < 100:
+            break
+        time.sleep(0.7)
+    rows = sorted(set(rows))
+    log(f"  [E1/E2] 东财公告 {code}: {len(rows)} 条({rows[0][0] if rows else '-'}~"
+        f"{rows[-1][0] if rows else '-'})")
+    return rows
+
+
+def _edgar_resolve_cik(code, log=print):
+    """EDGAR CIK 解析(本地映射→company_tickers.json 全量表)"""
+    if code in EDGAR_CIK:
+        return EDGAR_CIK[code]
+    r = requests.get('https://www.sec.gov/files/company_tickers.json',
+                     headers=EDGAR_UA, timeout=25)
+    r.raise_for_status()
+    for v in r.json().values():
+        if v.get('ticker') == code:
+            cik = str(v.get('cik_str')).zfill(10)
+            EDGAR_CIK[code] = cik
+            return cik
+    return None
+
+
+def _fetch_edgar_filings(code, log=print):
+    """SEC EDGAR submissions(仅 8-K): [{date, period, items, accept}] 按日期倒序"""
+    cik = _edgar_resolve_cik(code, log=log)
+    if not cik:
+        raise ValueError(f"{code}: EDGAR CIK 未解析")
+    r = requests.get(EDGAR_SUBMIT_API.format(cik=cik), headers=EDGAR_UA, timeout=25)
+    r.raise_for_status()
+    rec = (r.json().get('filings') or {}).get('recent') or {}
+    out = []
+    for form, fd, rp, items, acc in zip(rec.get('form', []), rec.get('filingDate', []),
+                                        rec.get('reportDate', []), rec.get('items', []),
+                                        rec.get('acceptanceDateTime', [])):
+        if form != '8-K':
+            continue
+        out.append({'date': str(fd)[:10], 'period': str(rp)[:10] if rp else None,
+                    'items': str(items or ''), 'accept': acc})
+    log(f"  [E1/E2] EDGAR {code}: 8-K {len(out)} 条({out[-1]['date'] if out else '-'}~"
+        f"{out[0]['date'] if out else '-'})")
+    return out
+
+
+def _fetch_report_time_day(date_iso, cache=None, log=print):
+    """百度 sapi report_time 单日披露清单(复用宏观客户端指纹链路);
+    cache 提供时跨调用共享(采集内一致性与未来扫描复用); 失败返回 None(区别于空清单)"""
+    if cache is not None and date_iso in cache:
+        return cache[date_iso]
+    try:
+        rows = fetch_macro_day(date_iso, cate='report_time')
+    except Exception as e:
+        print(f"[report_time:{date_iso}] {type(e).__name__}: {e}")
+        rows = None
+    if cache is not None:
+        cache[date_iso] = rows
+    time.sleep(1.1)              # 源节流(实测3~8s间隔稳定, 采集批1.1s+请求耗时已够)
+    return rows
+
+
+def _insert_ec(conn, code, market, name, cls, d, subtype, period, title, timing,
+               source, run_ts, run_date):
+    key = _ec_dedup_key(code, d, source, cls, subtype, period, title)
+    cur = conn.execute(
+        "INSERT OR IGNORE INTO earnings_calendar(code, market, name, event_class, "
+        "event_date, event_subtype, period, title, timing, source, run_ts, run_date, "
+        "dedup_key) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (code, market, name, cls, d, subtype, period, title, timing, source,
+         run_ts, run_date, key))
+    return cur.rowcount
+
+
+def collect_earnings_calendar(log=print, do_agreement=True, do_future=True):
+    """模块12 P1 采集入口(幂等): 池内每股 主源回填 → 百度交叉验证(一致率) → 未来排期扫描
+    单股失败不阻断(记 earnings_collect_log FAIL); 运行报告 dict"""
+    conn = get_db()
+    create_earnings_tables(conn)
+    run_ts = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    run_date = datetime.now().strftime('%Y-%m-%d')
+    pool = [(r['code'], r['market'], r['name'] or '')
+            for r in conn.execute(
+                "SELECT code, market, name FROM stock_pool WHERE is_active=1 "
+                "ORDER BY code")]
+    rt_cache = {}
+    report = {'stocks': [], 'agreement': None, 'future_rows': 0}
+
+    def _log_row(source, code, status, n_new, n_seen, note=''):
+        conn.execute("INSERT INTO earnings_collect_log(run_date, source, code, status, "
+                     "n_new, n_seen, note, run_ts) VALUES(?,?,?,?,?,?,?,?)",
+                     (run_date, source, code, status, n_new, n_seen, note, run_ts))
+
+    for code, market, name in pool:
+        n_new = n_seen = 0
+        try:
+            if market in ('A股', '港股'):
+                ann_type = 'A' if market == 'A股' else 'H'
+                trig = E1_TRIG[market]
+                src = 'eastmoney_notice'
+                for d, t in _fetch_em_notices(code, ann_type, log=log):
+                    n_seen += 1
+                    if any(p in t for p in trig):
+                        n_new += _insert_ec(conn, code, market, name, 'E1', d,
+                                            _e1_subtype(t), None, t, '未知', src,
+                                            run_ts, run_date)
+                    else:
+                        n_new += _insert_ec(conn, code, market, name, 'E2', d,
+                                            _e2_classify(t), None, t, '未知', src,
+                                            run_ts, run_date)
+            elif market == '美股':
+                src = 'sec_edgar'
+                for f in _fetch_edgar_filings(code, log=log):
+                    n_seen += 1
+                    items = {x.strip() for x in f['items'].split(',') if x.strip()}
+                    if '2.02' in items:
+                        n_new += _insert_ec(conn, code, market, name, 'E1', f['date'],
+                                            'earnings', f['period'],
+                                            f"8-K items={f['items']}",
+                                            _edgar_timing(f['accept']), src, run_ts, run_date)
+                    else:
+                        sub = next((v for k, v in EDGAR_ITEM_CLASS.items() if k in items),
+                                   'unclassified')
+                        n_new += _insert_ec(conn, code, market, name, 'E2', f['date'],
+                                            sub, f['period'],
+                                            f"8-K items={f['items']}",
+                                            _edgar_timing(f['accept']), src, run_ts, run_date)
+                time.sleep(1.2)          # EDGAR ≤10 req/s 纪律, 保守 1.2s
+            else:
+                continue
+            _log_row(src, code, 'OK', n_new, n_seen)
+            report['stocks'].append({'code': code, 'source': src,
+                                     'n_new': n_new, 'n_seen': n_seen})
+            log(f"  [E1/E2] {code}: 入库新增 {n_new}/{n_seen}")
+        except Exception as e:
+            print(f"[m12-collect:{code}] {type(e).__name__}: {e}")
+            _log_row('primary', code, 'FAIL', 0, 0, f"{type(e).__name__}: {e}"[:200])
+            report['stocks'].append({'code': code, 'source': 'FAIL', 'error': str(e)[:120]})
+    conn.commit()
+
+    # ---- 双源交叉验证: 主源最近 E1 日期在百度 report_time 精确 code 命中 ----
+    if do_agreement:
+        pairs = conn.execute(
+            "SELECT DISTINCT code, event_date FROM earnings_calendar "
+            "WHERE event_class='E1' AND source != 'baidu_report_time' "
+            "ORDER BY event_date DESC").fetchall()[:E1_AGREEMENT_DATES]
+        checked = confirmed = ambiguous = 0
+        for code, d in pairs:
+            items = _fetch_report_time_day(d, cache=rt_cache, log=log)
+            if items is None:
+                ambiguous += 1          # 源失败不计入分母
+                continue
+            if not items:
+                ambiguous += 1          # 当日清单为空(如周末)无覆盖证据, 不计入分母
+                continue
+            checked += 1
+            if any(str(x.get('code')) == code for x in items):
+                confirmed += 1
+        rate = (confirmed / checked) if checked else None
+        report['agreement'] = {'checked': checked, 'confirmed': confirmed,
+                               'ambiguous': ambiguous, 'rate': rate,
+                               'window': f"最近{len(pairs)}个主源E1日期"}
+        _log_row('baidu_report_time', None, 'OK' if rate is not None else 'FAIL',
+                 0, checked, json.dumps(report['agreement'], ensure_ascii=False))
+        conn.commit()
+        log(f"  [E1/E2] 双源一致率: {confirmed}/{checked}"
+            f"({rate:.1%})" if rate is not None else "  [E1/E2] 交叉验证无有效样本")
+
+    # ---- 未来预约排期扫描(百度 report_time, C3 下次财报日来源) ----
+    if do_future:
+        pool_codes = {c for c, _, _ in pool}
+        today = datetime.now().strftime('%Y-%m-%d')
+        for i in range(1, E1_FUTURE_SCAN_DAYS + 1):
+            d = (datetime.now() + timedelta(days=i)).strftime('%Y-%m-%d')
+            items = _fetch_report_time_day(d, cache=rt_cache, log=log)
+            if not items:
+                continue
+            for x in items:
+                if str(x.get('code')) in pool_codes:
+                    report['future_rows'] += _insert_ec(
+                        conn, str(x.get('code')), '', '', 'E1', d, '排期', None,
+                        f"预约排期 {x.get('name') or ''}", '预约', 'baidu_report_time',
+                        run_ts, run_date)
+        conn.commit()
+        log(f"  [E1/E2] 未来排期入池 {report['future_rows']} 条"
+            f"(未来{E1_FUTURE_SCAN_DAYS}天)")
+    conn.close()
+    return report
+
+
+def get_earnings_calendar_view():
+    """看板读路径(无DDL, sqlite_master 探测——坑25): 覆盖/下次财报/一致率/健康度"""
+    conn = get_db()
+    has = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
+                       "AND name='earnings_calendar'").fetchone()
+    rows = []
+    if has:
+        today = datetime.now().strftime('%Y-%m-%d')
+        pool = conn.execute("SELECT code, market, name FROM stock_pool WHERE is_active=1 "
+                            "ORDER BY code").fetchall()
+        for code, market, name in pool:
+            e1 = conn.execute("SELECT COUNT(DISTINCT event_date), MIN(event_date), "
+                              "MAX(event_date) FROM earnings_calendar WHERE code=? "
+                              "AND event_class='E1' AND event_subtype != '排期'",
+                              (code,)).fetchone()
+            nxt = conn.execute(
+                "SELECT event_date, event_subtype, source FROM earnings_calendar "
+                "WHERE code=? AND event_class='E1' AND event_date>? "
+                "ORDER BY event_date LIMIT 1", (code, today)).fetchone()
+            n2 = conn.execute(
+                "SELECT SUM(CASE WHEN event_subtype!='unclassified' THEN 1 ELSE 0 END), "
+                "SUM(CASE WHEN event_subtype='unclassified' THEN 1 ELSE 0 END), "
+                "COUNT(DISTINCT source) FROM earnings_calendar WHERE code=? "
+                "AND event_class='E2'", (code,)).fetchone()
+            rows.append({'code': code, 'name': name, 'market': market,
+                         'e1_dates': e1[0] or 0, 'e1_start': e1[1], 'e1_end': e1[2],
+                         'next_e1': nxt['event_date'] if nxt else None,
+                         'next_e1_kind': (nxt['event_subtype'] if nxt else None),
+                         'e2_classified': n2[0] or 0, 'e2_unclassified': n2[1] or 0,
+                         'sources': n2[2] or 0})
+    agreement = None
+    health = {}
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
+                    "AND name='earnings_collect_log'").fetchone():
+        r = conn.execute(
+            "SELECT note FROM earnings_collect_log WHERE source='baidu_report_time' "
+            "AND status='OK' AND note LIKE '%rate%' ORDER BY id DESC LIMIT 1").fetchone()
+        if r:
+            try:
+                agreement = json.loads(r[0])
+            except Exception:
+                pass
+        for src in ('eastmoney_notice', 'sec_edgar', 'baidu_report_time'):
+            day_rows = conn.execute(
+                "SELECT DISTINCT run_date FROM earnings_collect_log WHERE source=? "
+                "ORDER BY run_date DESC", (src,)).fetchall()
+            ok_days = 0
+            for (rd,) in day_rows:
+                n_fail = conn.execute(
+                    "SELECT COUNT(*) FROM earnings_collect_log WHERE source=? "
+                    "AND run_date=? AND status='FAIL'", (src, rd)).fetchone()[0]
+                if n_fail == 0:
+                    ok_days += 1
+                else:
+                    break
+            last = conn.execute(
+                "SELECT status, run_date FROM earnings_collect_log WHERE source=? "
+                "ORDER BY id DESC LIMIT 1", (src,)).fetchone()
+            health[src] = {'consecutive_ok_days': ok_days,
+                           'last_status': last[0] if last else None,
+                           'last_run': last[1] if last else None}
+    conn.close()
+    return {'rows': rows, 'agreement': agreement, 'health': health}
+
+
+def get_earnings_protection_matrix(days=14):
+    """双日历保护矩阵(D3前半): 池内股票 × 未来days天
+    个股财报周 = E1日期 ±3自然日包络(±2交易日的保守近似——未来日期无交易日历, P2引擎再精化)
+    宏观封锁日 = macro_overlay_days 台账(code+date 精确命中)
+    等级: 双叠加=P3(暂停加仓+仓位上限60%) / 单叠加=P2 / 无=P0 (模块12蓝图 事件·4)"""
+    conn = get_db()
+    has_ec = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
+                          "AND name='earnings_calendar'").fetchone()
+    pool = conn.execute("SELECT code, name FROM stock_pool WHERE is_active=1 "
+                        "ORDER BY code").fetchall()
+    today = datetime.now().strftime('%Y-%m-%d')
+    horizon = (datetime.now() + timedelta(days=days + 8)).strftime('%Y-%m-%d')
+    e1_dates = {}
+    if has_ec:
+        for r in conn.execute("SELECT DISTINCT code, event_date FROM earnings_calendar "
+                              "WHERE event_class='E1' AND event_date <= ? "
+                              "AND event_date >= date(?, '-12 day')",
+                              (horizon, today)):
+            e1_dates.setdefault(r['code'], set()).add(r['event_date'])
+    blocked = {}
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
+                    "AND name='macro_overlay_days'").fetchone():
+        for r in conn.execute("SELECT code, trade_date FROM macro_overlay_days "
+                              "WHERE trade_date >= ? AND trade_date <= ?",
+                              (today, horizon)):
+            blocked.setdefault(r['code'], set()).add(r['trade_date'])
+    conn.close()
+    cells, dates = [], []
+    for i in range(days):
+        dates.append((datetime.now() + timedelta(days=i)).strftime('%Y-%m-%d'))
+    for code, name in pool:
+        row = {'code': code, 'name': name}
+        for d in dates:
+            in_ew = any(abs((datetime.strptime(d, '%Y-%m-%d') -
+                             datetime.strptime(e, '%Y-%m-%d')).days) <= 3
+                        for e in e1_dates.get(code, ()))
+            in_mb = d in blocked.get(code, ())
+            lvl = 'P3' if (in_ew and in_mb) else ('P2' if (in_ew or in_mb) else 'P0')
+            mark = ' ⚠️' if lvl == 'P3' else (' 📈' if in_ew else (' 🔒' if in_mb else ''))
+            row[d] = lvl + mark
+        cells.append(row)
+    return {'dates': dates, 'rows': cells,
+            'legend': 'P3 ⚠️=财报周×宏观封锁双叠加(暂停加仓+仓位上限60%) · '
+                      'P2 📈=财报周(暂停加仓/隔夜减半) · P2 🔒=宏观封锁(模块9 overlay) · '
+                      'P0=正常; 财报周=±2交易日(展示用±3自然日包络); 排期日期可能变更'}
+
+
+def register_s3_forward_start(date_iso=None, log=print):
+    """P1 验收通过当日登记前向计数起点(模块12计划 第四节闸门3):
+    写 forward_meta.s3_event_protocol(独立键, DELETE+INSERT 幂等); 起点前 SxE 触发不入样本"""
+    conn = get_db()
+    create_forward_tables(conn)
+    date_iso = date_iso or datetime.now().strftime('%Y-%m-%d')
+    payload = {
+        'preregistered': S3_EVENT_PREREG['registered'],
+        'variants': [v['strategy_id'] for v in S3_EVENT_PREREG['variants']],
+        'gate': S3_EVENT_PREREG['gate'],
+        'adjudication': S3_EVENT_PREREG['adjudication'],
+        'forward_count_start': date_iso,
+        'note': ('模块12 P1 验收通过当日登记; 起点日之前的 SxE 触发不入样本'
+                 '(无财报日历期间无法计算C3, 口径不完整); 裁决规则不因起点登记而修改'),
+        'registered_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+    }
+    conn.execute("DELETE FROM forward_meta WHERE meta_key='s3_event_protocol'")
+    conn.execute("INSERT INTO forward_meta(meta_key, result_json, run_date, generated_at) "
+                 "VALUES(?,?,?,?)",
+                 ('s3_event_protocol', json.dumps(payload, ensure_ascii=False),
+                  datetime.now().strftime('%Y-%m-%d'), payload['registered_at']))
+    conn.commit()
+    conn.close()
+    log(f"[m12] s3_event_protocol 前向计数起点已登记: {date_iso}")
+    return payload
 
 
 def detect_signals(df, code, market, name="", source="live"):

@@ -1230,6 +1230,58 @@ elif page == "量化分析":
                                       expanded=True)
                     st.exception(e)
 
+        # --- 模块12: 财报日历 E1/E2 (P1 采集层) ---
+        st.subheader("📅 财报日历（模块 12 · E1 财报披露日 / E2 结构化公告）")
+        st.caption(
+            "主源：东财公告流（A/H 翻页全量入库按关键词分类）+ SEC EDGAR（美股 8-K，"
+            "items 含 2.02=财报发布，接收时间判盘前/盘后）；交叉源：百度 report_time"
+            "（双源一致率验收 + 未来 75 天预约排期 = C3 下次财报日）。"
+            "披露日=真披露日（区别于报告期——S3 删除根因，坑15）")
+        _ec_view = quant_data.get_earnings_calendar_view()
+        if _ec_view['rows']:
+            st.dataframe(pd.DataFrame([{
+                "代码": r['code'], "名称": r['name'], "市场": r['market'],
+                "E1财报日数": r['e1_dates'], "E1起点": r['e1_start'],
+                "E1终点": r['e1_end'], "下次财报": r['next_e1'],
+                "下次口径": r['next_e1_kind'], "E2已分类": r['e2_classified'],
+                "E2未分类": r['e2_unclassified'],
+            } for r in _ec_view['rows']]), use_container_width=True, hide_index=True)
+            if _ec_view.get('agreement'):
+                _ag = _ec_view['agreement']
+                _ag1, _ag2, _ag3 = st.columns(3)
+                _ag1.metric("双源一致率(P1验收≥95%)",
+                            f"{_ag['rate']:.1%}" if _ag.get('rate') is not None else "无样本")
+                _ag2.metric("交叉验证命中", f"{_ag['confirmed']}/{_ag['checked']}")
+                _ag3.metric("歧义日(不计分母)", _ag['ambiguous'])
+            _hl = _ec_view.get('health') or {}
+            if _hl:
+                st.caption("采集健康度(连续成功运行日)：" + " · ".join(
+                    f"{k}: {v['consecutive_ok_days']}天({v['last_status']}@{v['last_run']})"
+                    for k, v in _hl.items()))
+        else:
+            st.info("尚未采集财报日历——点击下方按钮完成五股回填 + 双源交叉验证 + 未来排期扫描")
+        if st.button("▶️ 采集财报日历（东财/EDGAR 回填 + 百度交叉验证 + 未来排期，幂等）",
+                     key="m12_collect"):
+            with st.status("财报日历采集中（东财翻页 + EDGAR + 百度逐日，约3-5分钟）...",
+                           expanded=True) as m12_status:
+                def _m12_log(msg):
+                    st.write(str(msg))
+                try:
+                    rep = quant_data.collect_earnings_calendar(log=_m12_log)
+                    tot_new = sum(s.get('n_new', 0) for s in rep['stocks'])
+                    ag = rep.get('agreement') or {}
+                    m12_status.update(
+                        label=(f"✅ 财报日历采集完成：主源新增 {tot_new} 行，"
+                               f"双源一致率 {ag.get('confirmed')}/{ag.get('checked')}"
+                               f"({(ag.get('rate') or 0):.1%})，未来排期 "
+                               f"{rep.get('future_rows', 0)} 条"),
+                        state="complete", expanded=False)
+                    st.rerun()
+                except Exception as e:
+                    m12_status.update(label="❌ 财报日历采集异常", state="error",
+                                      expanded=True)
+                    st.exception(e)
+
     # --- Tab 2: 信号检测 ---
     with quant_tab2:
         st.subheader("被动信号检测")
@@ -3563,6 +3615,17 @@ elif page == "量化分析":
                 st.json(_view['protocol'])
             else:
                 st.info("协议尚未生成（首次运行前向步进时写入并冻结）")
+
+        # ---------- ⑩ 双日历保护矩阵 (模块12 P1 · D3前半) ----------
+        try:
+            _mx = quant_data.get_earnings_protection_matrix()
+            st.markdown("**⑩ 双日历保护矩阵**（模块 12 · 个股财报周 × 宏观封锁日 → P0–P3）")
+            _mx_df = pd.DataFrame(_mx['rows']).set_index('code')
+            _mx_df.columns = [d[5:] for d in _mx_df.columns]   # MM-DD 短日期列名
+            st.dataframe(_mx_df, use_container_width=True, hide_index=False)
+            st.caption(_mx['legend'])
+        except Exception as e:
+            st.error(f"双日历保护矩阵读取失败: {e}")
 
 elif page == "数据库浏览":
     import tracker

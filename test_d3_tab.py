@@ -7,7 +7,9 @@ SNDK 闪迪 09-09 16:26 入池补课后重生成)。
 (行情端点移动 + m5 重跑重生当日批次: S1b超额70.01pp反超S2居首(槽位竞争效应再现,
 S1b持有5日出场更快、新端点下复利占优), S1a超额42.22pp, S1e+9.36pp) → 09-16 重钉
 (美股09-15行情终局到达+B1端点移动+当日批次重生: S2超额68.21pp回到居首,
-S1a超额43.27pp, S1e+10.41pp; 居首随端点在S1b/S2间翻转属已知模式) —
+S1a超额43.27pp, S1e+10.41pp; 居首随端点在S1b/S2间翻转属已知模式) → 09-16 二次重钉
+(17:41补跑管道吸收当日到货港股/指数端点后当日批次再生: 仅S1a 43.27→43.75pp漂移,
+S2居首/S1e不变) —
 单点读数随端点漂移属已知模式, 唯一稳定裁决仍是前向测试
 注意: test_module5 每次运行会重生成当日批次(run_d2_backtests 同日覆盖), 行情刷新后
 B1(恒满仓)端点移动而空仓策略不动 → 超额期望值以"数据刷新后重生成"的批次为准"""
@@ -168,8 +170,8 @@ check("数值列 dtype 均为数值型 int64/float64 (无 object 混型, Arrow �
           for c in cmp_df.columns if c != '对象'))
 s1a = cmp_df[cmp_df['对象'].str.startswith('S1a ')].iloc[0]
 check(f"S1a OOS收益 40.26 (实际 {s1a['OOS收益%']})", abs(s1a['OOS收益%'] - 40.26) < 0.01)
-check(f"S1a OOS超额vsB1 43.27pp (实际 {s1a['OOS超额vsB1(pp)']})",
-      abs(s1a['OOS超额vsB1(pp)'] - 43.27) < 0.01)
+check(f"S1a OOS超额vsB1 43.75pp (实际 {s1a['OOS超额vsB1(pp)']})",
+      abs(s1a['OOS超额vsB1(pp)'] - 43.75) < 0.01)
 
 print("[6] 费率敏感性图构建")
 fig_fee = make_subplots(rows=1, cols=2, subplot_titles=("full 段", "oos 段"))
