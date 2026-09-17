@@ -2577,6 +2577,277 @@ def register_s3_forward_start(date_iso=None, log=print):
     return payload
 
 
+# ============================================================
+# 门控批次基础设施(模块12 P2 事件门控 + 波动域门控 P1, 2026-09-18)
+# 两类门控与模块9 overlay 同构: 二值门控只做减法, 回测段=机制对照(选择泄漏),
+# 唯一裁决=前向; 触发日 T 评估, T+1 开盘成交纪律不变
+# ============================================================
+VOL_GATE_PREREG = {
+    'registered': '2026-09-17',
+    'variants': [
+        {'strategy_id': 'S1bV', 'parent_id': 'S1b', 'name': '变体·大跌持有5日·波动域门控'},
+        {'strategy_id': 'S2V', 'parent_id': 'S2', 'name': '变体·超跌反弹持有5日·波动域门控'},
+    ],
+    'gate': [('C-V', '波动域', 'σ20(T−1) 年化 ≥ 80% (daily_indicators.volatility20 前移一日, '
+                          '与适配性研究 H-AD2 分层口径一致); 缺失→保守拒绝')],
+    'adjudication': {
+        'min_trades': 20,
+        'rules': ('SxV各完成>=20笔前向交易后与原版并行对照: 超额vs B1<=0 → 淘汰建议; '
+                  '超额>0但<=原版 → 无增量淘汰; 超额>0且>原版且胜率>=原版 → 转正候选; '
+                  '其余继续观察'),
+        'freeze_note': ('裁决规则预注册于 2026-09-17(波动域门控变体预注册.md 五), '
+                        '不得依前向结果修改'),
+    },
+    'evidence_note': ('H-AD2为keep-5合并层证据(高波动域+10.84pp vs 低域-1.1pp), '
+                      '单家族高域内超额未单独验证——核心赌注由前向裁决; '
+                      '回测段全部标注选择泄漏非证据'),
+    'doc': '波动域门控变体预注册.md',
+}
+
+GATE_VOL_ANNUAL = 0.80              # C-V: σ20(T-1) 年化阈值(冻结)
+GATE_C1_WINDOW = 5                  # C1: 前N个交易日(含T)无生效主动事件
+GATE_C2_RSI = 30.0                  # C2: 触发日 RSI14 下限
+GATE_C3_MIN_TD = 10                 # C3: 下次财报日−触发日 ≥ N 个交易日
+
+
+def _load_gate_context(data=None):
+    """门控上下文预载(写事务前调用——坑25/模块9#3 同源纪律):
+    vol_prev: {code:{date: σ20(T-1)年化}}; rsi14: {code:{date:值}};
+    e1: {code:[E1日期升序]}(含排期); evt: {code:[active_events日期升序]}(C1);
+    stock_dates/date_idx 取自回测/前向数据(交易日距离计算)"""
+    conn = get_db()
+    pool_f, pool_args = _pool_sql_filter(_pool_code_set())
+    vol_prev, rsi14 = {}, {}
+    for r in conn.execute(
+            f"SELECT code, trade_date, volatility20, rsi14 FROM daily_indicators "
+            f"WHERE {pool_f} ORDER BY code, trade_date", pool_args):
+        prev = vol_prev.setdefault(r['code'], {})
+        rs = rsi14.setdefault(r['code'], {})
+        prev[r['trade_date']] = r['volatility20']   # 先存当日值, 下一步前移一日
+        rs[r['trade_date']] = r['rsi14']
+    conn.close()
+    # 前移一日: date[i] 的门控值 = date[i-1] 的值(防同日自指, 预注册口径)
+    for code, prev in vol_prev.items():
+        items = sorted(prev.items())
+        shifted = {}
+        last = None
+        for i, (d, v) in enumerate(items):
+            if last is not None:
+                shifted[d] = (last / 100.0) * (252 ** 0.5) if last is not None else None
+            last = v
+        vol_prev[code] = shifted
+    conn = get_db()
+    e1, evt = {}, {}
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
+                    "AND name='earnings_calendar'").fetchone():
+        for r in conn.execute("SELECT DISTINCT code, event_date FROM earnings_calendar "
+                              "WHERE event_class='E1'"):
+            e1.setdefault(r['code'], []).append(r['event_date'])
+    for r in conn.execute(f"SELECT DISTINCT code, trade_date FROM active_events WHERE {pool_f}",
+                          pool_args):
+        evt.setdefault(r['code'], []).append(r['trade_date'])
+    conn.close()
+    for d in (e1, evt):
+        for k in d:
+            d[k].sort()
+    return {'vol_prev': vol_prev, 'rsi14': rsi14, 'e1': e1, 'evt': evt}
+
+
+def _vol_gate_ok(code, tdate, ctx):
+    """C-V: σ20(T-1) 年化 ≥ 80%; 缺失→保守拒绝(预注册口径)"""
+    v = ctx['vol_prev'].get(code, {}).get(tdate)
+    return v is not None and v >= GATE_VOL_ANNUAL
+
+
+def _event_gate_detail(code, tdate, ctx, dates, date_idx):
+    """错杀三条件逐项判定(返回 dict 含每条布尔与全过标志):
+    C1 事件空白: 前GATE_C1_WINDOW个交易日(含T)该股无 active_events(当前有效=分红)
+    C2 技术超卖: 触发日 RSI14 < GATE_C2_RSI
+    C3 财报远期: 下次E1日 − T ≥ GATE_C3_MIN_TD 个交易日; 无下次E1(排期缺位)→保守拒绝;
+                 E1日超出已知日历时按 floor(日历天×5/7) 近似(披露口径)"""
+    out = {'C1': False, 'C2': False, 'C3': False}
+    i = date_idx.get(tdate)
+    if i is None:
+        return out
+    # C1
+    evts = ctx['evt'].get(code, [])
+    lo = dates[i - GATE_C1_WINDOW + 1] if i >= GATE_C1_WINDOW - 1 else dates[0]
+    out['C1'] = not any(lo <= e <= tdate for e in evts)
+    # C2
+    r = ctx['rsi14'].get(code, {}).get(tdate)
+    out['C2'] = r is not None and r < GATE_C2_RSI
+    # C3
+    nxt = next((e for e in ctx['e1'].get(code, []) if e > tdate), None)
+    if nxt is not None:
+        j = date_idx.get(nxt)
+        if j is not None:
+            out['C3'] = (j - i) >= GATE_C3_MIN_TD
+        else:
+            from math import floor
+            cal_days = (datetime.strptime(nxt, '%Y-%m-%d')
+                        - datetime.strptime(tdate, '%Y-%m-%d')).days
+            out['C3'] = floor(cal_days * 5 / 7) >= GATE_C3_MIN_TD
+    return out
+
+
+def _make_gate_fn(spec, ctx, data):
+    """策略规格 → 门控函数 (code, tdate)→bool; 非门控策略返回 None"""
+    if spec.get('vol_gate'):
+        return lambda c, d: _vol_gate_ok(c, d, ctx)
+    if spec.get('event_gate'):
+        def _eg(c, d):
+            st = data['stocks'].get(c)
+            if not st:
+                return False
+            det = _event_gate_detail(c, d, ctx, st['dates'], st['date_idx'])
+            return det['C1'] and det['C2'] and det['C3']
+        return _eg
+    return None
+
+
+def register_vol_gate_start(date_iso=None, log=print):
+    """波动域门控引擎接入交付当日登记计数起点(波动域门控变体预注册.md 五):
+    写 forward_meta.vol_gate_protocol(独立键, DELETE+INSERT 幂等)"""
+    conn = get_db()
+    create_forward_tables(conn)
+    date_iso = date_iso or datetime.now().strftime('%Y-%m-%d')
+    payload = {
+        'preregistered': VOL_GATE_PREREG['registered'],
+        'variants': [v['strategy_id'] for v in VOL_GATE_PREREG['variants']],
+        'gate': VOL_GATE_PREREG['gate'],
+        'adjudication': VOL_GATE_PREREG['adjudication'],
+        'forward_count_start': date_iso,
+        'note': ('引擎接入交付当日登记; 起点日之前的 SxV 触发不入样本; '
+                 '裁决规则不因起点登记而修改'),
+        'registered_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+    }
+    conn.execute("DELETE FROM forward_meta WHERE meta_key='vol_gate_protocol'")
+    conn.execute("INSERT INTO forward_meta(meta_key, result_json, run_date, generated_at) "
+                 "VALUES(?,?,?,?)",
+                 ('vol_gate_protocol', json.dumps(payload, ensure_ascii=False),
+                  datetime.now().strftime('%Y-%m-%d'), payload['registered_at']))
+    conn.commit()
+    conn.close()
+    log(f"[vol-gate] vol_gate_protocol 前向计数起点已登记: {date_iso}")
+    return payload
+
+
+def get_vol_gate_cards():
+    """S1bV/S2V 预注册卡片(D1悬置假设区): 引擎接入后显示计数起点与进度"""
+    conn = get_db()
+    reg, prog = None, {}
+    try:
+        r = conn.execute("SELECT result_json FROM forward_meta WHERE "
+                         "meta_key='vol_gate_protocol' ORDER BY id DESC LIMIT 1").fetchone()
+        if r:
+            reg = json.loads(r[0])
+        for sid in ('S1bV', 'S2V'):
+            n = conn.execute("SELECT COUNT(*) FROM forward_trades WHERE strategy_id=?",
+                             (sid,)).fetchone()[0]
+            prog[sid] = n
+    except sqlite3.OperationalError:
+        pass
+    finally:
+        conn.close()
+    out = []
+    for v in VOL_GATE_PREREG['variants']:
+        sid = v['strategy_id']
+        if reg:
+            note = (f"波动域门控(σ20年化≥{GATE_VOL_ANNUAL:.0%}): {v['parent_id']}+C-V, "
+                    f"计数起点 {reg['forward_count_start']}, 前向完成 {prog.get(sid, 0)}/20 笔")
+            verdict = '🔵 门控就绪·样本积累中'
+        else:
+            note = f"波动域门控预注册: {v['parent_id']}+C-V(σ20年化≥80%), 待引擎接入"
+            verdict = '🔵 预注册·待引擎接入'
+        out.append({'strategy_id': sid, 'name': v['name'], 'note': note,
+                    'n_trades': prog.get(sid), 'min_trades': 20, 'verdict': verdict})
+    return out
+
+
+def _evaluate_gate_variants(pairs, protocol_note):
+    """门控变体前向裁决读数(通用): pairs=[(variant_id, parent_id)]
+    规则(两类预注册同构): ≥20笔后 对照超额vs B1 与原版并行比较"""
+    status = _forward_status()
+    conn = get_db()
+    out = []
+    for vid, pid in pairs:
+        n = conn.execute("SELECT COUNT(*) FROM forward_trades WHERE strategy_id=?",
+                         (vid,)).fetchone()[0]
+        entry = {'variant': vid, 'parent': pid, 'n_trades': n,
+                 'min_trades': FORWARD_ADJ_MIN_TRADES,
+                 'eligible': n >= FORWARD_ADJ_MIN_TRADES, 'verdict': '⏳ 样本积累中'}
+        if entry['eligible']:
+            st_v = (status['strategies'].get(vid) or {})
+            st_p = (status['strategies'].get(pid) or {})
+            ex_v = st_v.get('excess_vs_b1')
+            ex_p = st_p.get('excess_vs_b1')
+            wr_v = st_v.get('win_rate')
+            wr_p = st_p.get('win_rate')
+            entry.update({'excess_vs_b1': ex_v, 'parent_excess': ex_p,
+                          'win_rate': wr_v, 'parent_win_rate': wr_p})
+            if ex_v is None:
+                entry['verdict'] = '⏳ 读数缺失'
+            elif ex_v <= 0:
+                entry['verdict'] = '🔴 淘汰建议(超额vs B1≤0)'
+            elif ex_p is not None and ex_v <= ex_p:
+                entry['verdict'] = '🔴 无增量淘汰(≤原版)'
+            elif (wr_p is not None and wr_v is not None and wr_v >= wr_p):
+                entry['verdict'] = '🟢 转正候选'
+            else:
+                entry['verdict'] = '🟡 继续观察(胜率低于原版)'
+        out.append(entry)
+    conn.close()
+    return {'variants': out, 'protocol': protocol_note}
+
+
+def evaluate_s3_event():
+    """模块12 P2: S1aE/S2E 事件门控前向裁决读数(规则冻结于模块12开发计划.md 三)"""
+    return _evaluate_gate_variants(
+        [('S1aE', 'S1a'), ('S2E', 'S2')],
+        'forward_meta.s3_event_protocol(预注册 2026-09-15, 计数起点 2026-09-16)')
+
+
+def evaluate_vol_gate():
+    """波动域门控前向裁决读数(规则冻结于波动域门控变体预注册.md 五)"""
+    return _evaluate_gate_variants(
+        [('S1bV', 'S1b'), ('S2V', 'S2')],
+        'forward_meta.vol_gate_protocol(预注册 2026-09-17)')
+
+
+def get_s3_candidates_view(days=45):
+    """D3后半·错杀候选实时标记(只读): 近days日 S1a/S2 触发族的逐条三条件判定
+    错杀候选 = C1∧C2∧C3 全过(允许逆势加仓的判定口径, 预注册冻结)"""
+    conn = get_db()
+    pool_f, pool_args = _pool_sql_filter(_pool_code_set())
+    since = (datetime.now() - timedelta(days=days)).strftime('%Y-%m-%d')
+    sigs = [tuple(r) for r in conn.execute(
+        f"SELECT DISTINCT code, trade_date, signal_type, signal_subtype "
+        f"FROM passive_signals WHERE {pool_f} AND trade_date>=? AND signal_type || '/' || "
+        f"signal_subtype IN ('price_limit/大跌','boll_break/跌破下轨','rsi_oversold/超卖')",
+        tuple(pool_args) + (since,))]
+    conn.close()
+    if not sigs:
+        return {'rows': [], 'window_days': days}
+    data = _forward_replay_data()
+    ctx = _load_gate_context(data)
+    today = datetime.now().strftime('%Y-%m-%d')
+    rows = []
+    for code, d, st, sst in sorted(set(sigs), key=lambda x: (x[1], x[0]), reverse=True):
+        stk = data['stocks'].get(code)
+        if not stk or d not in stk['date_idx']:
+            continue
+        det = _event_gate_detail(code, d, ctx, stk['dates'], stk['date_idx'])
+        r14 = ctx['rsi14'].get(code, {}).get(d)
+        nxt = next((e for e in ctx['e1'].get(code, []) if e > d), None)
+        rows.append({'code': code, 'date': d, 'signal': f'{st}/{sst}',
+                     'C1': det['C1'], 'C2': det['C2'], 'C3': det['C3'],
+                     'rsi14': round(r14, 1) if r14 is not None else None,
+                     'next_e1': nxt,
+                     'candidate': det['C1'] and det['C2'] and det['C3']})
+    return {'rows': rows, 'window_days': days, 'asof': today}
+
+
+
 def detect_signals(df, code, market, name="", source="live"):
     signals = []
     if len(df) < 30:
@@ -3330,6 +3601,26 @@ BT_STRATEGIES = {
                       ('rsi_oversold', '超卖')], 'hold': 5, 'overlay': True},
     'S1aM': {'name': '单信号·大跌持有10日·宏观封锁',
              'match': [('price_limit', '大跌')], 'hold': 10, 'overlay': True},
+    # 模块12 P2 事件门控变体(预注册冻结 2026-09-15, 模块12开发计划.md 权威):
+    # L1=原版触发不动, L2=错杀三条件二值门控只做减法(C1事件空白/C2技术超卖/C3财报远期);
+    # 回测段=机制对照(选择泄漏), 唯一裁决=前向; fwd_start=前向计数起点(此前后向触发不入样本)
+    'S1aE': {'name': '变体·大跌持有10日·事件门控',
+             'match': [('price_limit', '大跌')], 'hold': 10, 'event_gate': True,
+             'fwd_start': '2026-09-16'},
+    'S2E': {'name': '变体·超跌反弹持有5日·事件门控',
+            'match': [('boll_break', '跌破下轨'), ('price_limit', '大跌'),
+                      ('rsi_oversold', '超卖')], 'hold': 5, 'event_gate': True,
+            'fwd_start': '2026-09-16'},
+    # 波动域门控变体(预注册冻结 2026-09-17, 波动域门控变体预注册.md 权威):
+    # C-V: σ20(T-1)年化>=80% 放行(适配性研究 H-AD2 口径), 二值门控只做减法;
+    # fwd_start=引擎接入交付日登记(vol_gate_protocol)
+    'S1bV': {'name': '变体·大跌持有5日·波动域门控',
+             'match': [('price_limit', '大跌')], 'hold': 5, 'vol_gate': True,
+             'fwd_start': '2026-09-18'},
+    'S2V': {'name': '变体·超跌反弹持有5日·波动域门控',
+            'match': [('boll_break', '跌破下轨'), ('price_limit', '大跌'),
+                      ('rsi_oversold', '超卖')], 'hold': 5, 'vol_gate': True,
+            'fwd_start': '2026-09-18'},
 }
 
 # D2.0 知识截止日协议(冻结于 2026-08-31, 详见 模块5开发计划.md):
@@ -3411,7 +3702,7 @@ def _collect_triggers(data, spec):
 
 
 def _run_strategy_bt(data, triggers, hold, max_pos=BT_MAX_POSITIONS, fee=BT_FEE,
-                     blocked_days=None, drop_incomplete=True):
+                     blocked_days=None, drop_incomplete=True, gate_fn=None):
     """槽位制事件回测核心:
     T日触发 → T+1开盘买入 → 持有hold个交易日 → 开盘卖出
     drop_incomplete=True(默认, 回测口径): 数据末端无法完成完整持仓的信号直接放弃(end_dropped)
@@ -3420,17 +3711,23 @@ def _run_strategy_bt(data, triggers, hold, max_pos=BT_MAX_POSITIONS, fee=BT_FEE,
     开仓日本身超界的触发仍按 end_dropped 跳过(仓位尚未建立, 无可盯市)
     blocked_days(模块9 overlay): {code: set(开仓日)} — 命中封锁日的开仓放弃(macro_blocked),
     只拒新仓不影响持仓; 默认 None 行为与模块5完全一致(向后兼容)
+    gate_fn(门控批次 2026-09-18): (code, 触发日T)→bool, 触发期评估不过则放弃(gate_blocked)
+    ——事件门控C1/C2/C3与波动域门控C-V共用此注入口, 与blocked_days正交可叠加
     返回 {'equity','trades','rejected','end_dropped','fund_util','n_triggers',
-          'macro_blocked','open_positions'}"""
+          'macro_blocked','gate_blocked','open_positions'}"""
     # 1) 触发 → 交易计划(先计算索引, 过滤超界)
     plans = []
     end_dropped = 0
+    gate_blocked = 0
     for code, tdate in triggers:
         st = data['stocks'].get(code)
         if not st:
             continue
         i = st['date_idx'].get(tdate)
         if i is None:
+            continue
+        if gate_fn is not None and not gate_fn(code, tdate):
+            gate_blocked += 1
             continue
         b, s = i + 1, i + 1 + hold
         if s >= len(st['dates']):
@@ -3507,6 +3804,7 @@ def _run_strategy_bt(data, triggers, hold, max_pos=BT_MAX_POSITIONS, fee=BT_FEE,
     return {'equity': equity, 'trades': trades, 'rejected': rejected,
             'end_dropped': end_dropped, 'fund_util': fund_util,
             'n_triggers': len(triggers), 'macro_blocked': macro_blocked,
+            'gate_blocked': gate_blocked,
             'open_positions': sum(1 for x in slot_busy if x is not None)}
 
 
@@ -3610,11 +3908,12 @@ def _index_baseline(data):
 
 
 def run_backtest(strategy_id, max_pos=BT_MAX_POSITIONS, fee=BT_FEE,
-                 data=None, start_date=None, blocked_days=None):
+                 data=None, start_date=None, blocked_days=None, gate_ctx=None):
     """单策略回测入口(不写库, 供批量执行与看板调用)
     start_date=段锚定日(oos段=知识截止日; full段=REPLAY_START): 仅统计
     trade_date > start_date 的触发, 日历截取至该日之后, 净值从 1 重起
-    blocked_days(模块9): overlay 策略未显式传入时自动从台账加载"""
+    blocked_days(模块9): overlay 策略未显式传入时自动从台账加载
+    gate_ctx(门控批次): 事件/波动域门控策略的上下文, 未传时懒加载(批量场景预载复用)"""
     data = data if data is not None else _load_backtest_data()
     if start_date is not None:
         data = _filter_bt_data(data, start_date)
@@ -3626,8 +3925,12 @@ def run_backtest(strategy_id, max_pos=BT_MAX_POSITIONS, fee=BT_FEE,
         blocked_days = _load_overlay_blocked(data)
     if not spec.get('overlay'):
         blocked_days = None
+    gate_fn = None
+    if spec.get('vol_gate') or spec.get('event_gate'):
+        gate_fn = _make_gate_fn(spec, gate_ctx if gate_ctx is not None
+                                else _load_gate_context(data), data)
     res = _run_strategy_bt(data, triggers, spec['hold'], max_pos, fee,
-                           blocked_days=blocked_days)
+                           blocked_days=blocked_days, gate_fn=gate_fn)
     res['strategy_id'] = strategy_id
     res['strategy_name'] = spec['name']
     res['metrics'] = _perf_metrics(res['equity'], data['calendar'],
@@ -4302,6 +4605,8 @@ def run_d2_backtests():
     # 封锁日集必须在首个写事务开始前预载: 批量入库是数万行未提交大事务,
     # 缓存溢出后SQLite持EXCLUSIVE锁, 事务中途新连接读台账必被拒(问题日志#3)
     overlay_blocked = _load_overlay_blocked(data)
+    # 门控批次(2026-09-18): 事件/波动域门控上下文同规则预载(批量12策略×6run复用)
+    gate_ctx = _load_gate_context(data)
     conn = get_db()
     create_backtest_tables(conn)
     now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -4400,7 +4705,7 @@ def run_d2_backtests():
         for sid, spec in BT_STRATEGIES.items():
             for fee in BT_FEE_SENSITIVITY:
                 res = run_backtest(sid, BT_MAX_POSITIONS, fee, data, seg_anchor,
-                                   blocked_days=overlay_blocked)
+                                   blocked_days=overlay_blocked, gate_ctx=gate_ctx)
                 if fee == 0.0:
                     fee0[sid] = res
                 insert_run('strategy', sid, spec['name'], seg, fee, res, cal,
@@ -4417,7 +4722,8 @@ def run_d2_backtests():
                                  'n_triggers': r['n_triggers'],
                                  'rejected': r['rejected'],
                                  'end_dropped': r['end_dropped'],
-                                 'macro_blocked': r.get('macro_blocked', 0)}
+                                 'macro_blocked': r.get('macro_blocked', 0),
+                                 'gate_blocked': r.get('gate_blocked', 0)}
                            for sid, r in fee0.items()},
             'baselines': {bid: {'name': b['name'], 'metrics': b['metrics'],
                                 'equity': b['equity']}
@@ -4628,6 +4934,8 @@ def run_forward_step(log=print):
     # 模块9: 台账预载于首个写事务之前(问题日志#3同源: 前向窗口增长后
     # 循环内开新连接读台账会与大事务锁冲突)
     overlay_blocked = _load_overlay_blocked(fwd)
+    # 门控批次(2026-09-18): 门控上下文预载于写事务之前(同纪律)
+    gate_ctx = _load_gate_context(fwd)
 
     report = {'ok': True, 'forward_start': FORWARD_START, 'n_days': len(cal),
               'window': [cal[0], cal[-1]],
@@ -4661,14 +4969,19 @@ def run_forward_step(log=print):
     status_strategies = {}
     for sid, spec in BT_STRATEGIES.items():
         # 模块10: 触发按资格区间过滤(离池区间/入池前历史信号不计入前向)
+        # 门控批次(2026-09-18): 门控变体另按 fwd_start 过滤——计数起点前触发不入样本
+        # (s3_event_protocol 2026-09-16 / vol_gate_protocol 2026-09-18, 预注册口径)
+        trig_floor = max(FORWARD_START, spec.get('fwd_start') or FORWARD_START)
         triggers = [(c, d) for (c, d) in _collect_triggers(fwd, spec)
-                    if d >= FORWARD_START and _member_on(membership, c, d)]
+                    if d >= trig_floor and _member_on(membership, c, d)]
         # 模块9: overlay 变体用预载封锁日集(台账只追加不改写→重放确定性)
         blocked = overlay_blocked if spec.get('overlay') else None
+        # 门控批次: 事件/波动域门控函数(上下文已预载)
+        gate_fn = _make_gate_fn(spec, gate_ctx, fwd)
         # 前向口径(2026-09-07 修复): 出场日未到的持仓盯市不丢弃 — 空仓1.0是引擎缺陷产物
         res = _run_strategy_bt(fwd, triggers, spec['hold'],
                                BT_MAX_POSITIONS, FORWARD_FEE, blocked_days=blocked,
-                               drop_incomplete=False)
+                               drop_incomplete=False, gate_fn=gate_fn)
         metrics = _perf_metrics(res['equity'][:len(cal_stock)], cal_stock,
                                 res['trades'], res['fund_util'])
         for t in res['trades']:
@@ -4694,9 +5007,13 @@ def run_forward_step(log=print):
         status_strategies[sid] = {
             'name': spec['name'], 'observation': bool(spec.get('observation')),
             'overlay': bool(spec.get('overlay')),
+            'event_gate': bool(spec.get('event_gate')),
+            'vol_gate': bool(spec.get('vol_gate')),
+            'fwd_start': spec.get('fwd_start') or FORWARD_START,
             'n_triggers': res['n_triggers'], 'n_trades': len(capped_trades),
             'rejected': res['rejected'], 'end_dropped': res['end_dropped'],
             'macro_blocked': res.get('macro_blocked', 0),
+            'gate_blocked': res.get('gate_blocked', 0),
             'open_positions': res.get('open_positions', 0),
             'total_return': total, 'sharpe': metrics.get('sharpe'),
             'max_drawdown': metrics.get('max_drawdown'), 'win_rate': win_rate,

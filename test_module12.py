@@ -159,7 +159,9 @@ finally:
                      "VALUES('s3_event_protocol',?,?,?)", (orig[0], '', ''))
     conn.commit()
     conn.close()
-check("原值恢复后卡片回落未登记态", '待采集层' in qd.get_s3_prereg_cards()[0]['verdict'])
+check("原值恢复后卡片回到登记前原状态",
+      ('待采集层' in qd.get_s3_prereg_cards()[0]['verdict']) if orig is None
+      else ('采集层就绪' in qd.get_s3_prereg_cards()[0]['verdict']))
 
 print()
 print("=" * 66)
@@ -200,7 +202,98 @@ conn.close()
 
 print()
 print("=" * 66)
-print(f"模块12 P1 测试汇总: {ok} 通过 / {len(fail)} 失败")
+print("[8] 门控批次(模块12 P2 事件门控 + 波动域门控 P1, 2026-09-18)")
+print("=" * 66)
+# 8.1 注册表
+check(f"策略集 12 个(含4门控变体)", len(qd.BT_STRATEGIES) == 12)
+for vid, pid in [('S1aE', 'S1a'), ('S2E', 'S2'), ('S1bV', 'S1b'), ('S2V', 'S2')]:
+    v, p = qd.BT_STRATEGIES[vid], qd.BT_STRATEGIES[pid]
+    check(f"{vid} 与原版 {pid} match/hold 完全一致(唯一差异=门控)",
+          v['match'] == p['match'] and v['hold'] == p['hold']
+          and (v.get('event_gate') or v.get('vol_gate')))
+check("S1aE/S2E fwd_start = 2026-09-16(与 s3_event_protocol 登记)",
+      qd.BT_STRATEGIES['S1aE']['fwd_start'] == '2026-09-16'
+      and qd.BT_STRATEGIES['S2E']['fwd_start'] == '2026-09-16')
+conn = qd.get_db()
+reg_v = json.loads(conn.execute("SELECT result_json FROM forward_meta WHERE "
+                                "meta_key='vol_gate_protocol'").fetchone()[0])
+check("vol_gate_protocol 已登记且与 S1bV/S2V fwd_start 一致",
+      reg_v['forward_count_start'] == qd.BT_STRATEGIES['S1bV']['fwd_start'] ==
+      qd.BT_STRATEGIES['S2V']['fwd_start'])
+# 8.2 门控单元(合成上下文)
+ctx = {'vol_prev': {'X': {'2026-01-05': 0.79, '2026-01-06': 0.80, '2026-01-07': 1.2}},
+       'rsi14': {'X': {'2026-01-06': 29.9, '2026-01-07': 30.0}},
+       'e1': {'X': ['2026-01-25']}, 'evt': {'X': []}}
+check("C-V 边界: 0.79 拒 0.80 过(≥)",
+      not qd._vol_gate_ok('X', '2026-01-05', ctx) and qd._vol_gate_ok('X', '2026-01-06', ctx))
+dates = ['2026-01-02', '2026-01-03', '2026-01-04', '2026-01-05', '2026-01-06', '2026-01-07',
+         '2026-01-08', '2026-01-09', '2026-01-10', '2026-01-11', '2026-01-12', '2026-01-13',
+         '2026-01-14', '2026-01-15', '2026-01-16', '2026-01-17', '2026-01-18', '2026-01-19',
+         '2026-01-20', '2026-01-21', '2026-01-22', '2026-01-23', '2026-01-24', '2026-01-25']
+didx = {d: i for i, d in enumerate(dates)}
+det = qd._event_gate_detail('X', '2026-01-06', ctx, dates, didx)
+check("C2 边界: RSI14<30 (29.9 过 30.0 不过)",
+      det['C2'] is True
+      and qd._event_gate_detail('X', '2026-01-07', ctx, dates, didx)['C2'] is False)
+check("C3: 下次E1距触发19交易日 ≥10 过", det['C3'] is True)
+det2 = qd._event_gate_detail('X', '2026-01-16', ctx, dates, didx)
+check("C3: 距下次E1 7交易日 <10 拒", det2['C3'] is False)
+ctx_no_e1 = dict(ctx, e1={'X': []})
+check("C3 保守拒绝: 无下次E1(排期缺位)",
+      qd._event_gate_detail('X', '2026-01-06', ctx_no_e1, dates, didx)['C3'] is False)
+ctx_evt = dict(ctx, evt={'X': ['2026-01-04']})
+check("C1: 前5交易日(含T)内有事件 → 拒",
+      qd._event_gate_detail('X', '2026-01-06', ctx_evt, dates, didx)['C1'] is False)
+ctx_evt2 = dict(ctx, evt={'X': ['2026-01-01']})
+check("C1: 窗口外事件 → 过",
+      qd._event_gate_detail('X', '2026-01-06', ctx_evt2, dates, didx)['C1'] is True)
+conn.close()
+
+# 8.3 机制对照批次硬不变量(09-18 批次, 读库验证)
+conn = qd.get_db()
+batch = conn.execute("SELECT MAX(run_date) FROM backtest_runs").fetchone()[0]
+gate_ctx = qd._load_gate_context()
+rows = list(conn.execute(
+    "SELECT t.strategy_id, t.code, t.trigger_date FROM backtest_trades t "
+    "JOIN backtest_runs r ON t.run_id=r.run_id WHERE r.run_date=? AND r.fee=0 "
+    "AND t.strategy_id IN ('S1bV','S2V')", (batch,)))
+viol = [r for r in rows if not qd._vol_gate_ok(r['code'], r['trigger_date'], gate_ctx)]
+check(f"SxV 开仓触发日 100% 高波动域({len(rows)}笔全查)", not viol)
+for vid, pid in [('S1aE', 'S1a'), ('S2E', 'S2'), ('S1bV', 'S1b'), ('S2V', 'S2')]:
+    nv = conn.execute("SELECT COUNT(*) FROM backtest_trades t JOIN backtest_runs r ON "
+                      "t.run_id=r.run_id WHERE r.run_date=? AND r.fee=0 AND t.strategy_id=?",
+                      (batch, vid)).fetchone()[0]
+    np_ = conn.execute("SELECT COUNT(*) FROM backtest_trades t JOIN backtest_runs r ON "
+                       "t.run_id=r.run_id WHERE r.run_date=? AND r.fee=0 AND t.strategy_id=?",
+                       (batch, pid)).fetchone()[0]
+    check(f"{vid} 笔数({nv}) ≤ 原版 {pid}({np_})——门控只做减法", nv <= np_)
+# 8.4 前向计数起点纪律: 门控变体无起点前交易
+for vid in ('S1aE', 'S2E', 'S1bV', 'S2V'):
+    floor = qd.BT_STRATEGIES[vid]['fwd_start']
+    n_bad = conn.execute("SELECT COUNT(*) FROM forward_trades WHERE strategy_id=? AND "
+                         "trigger_date < ?", (vid, floor)).fetchone()[0]
+    check(f"{vid} 无 fwd_start({floor}) 前前向交易", n_bad == 0)
+conn.close()
+# 8.5 评估器与卡片
+ev1, ev2 = qd.evaluate_s3_event(), qd.evaluate_vol_gate()
+check("裁决读数各2变体", len(ev1['variants']) == 2 and len(ev2['variants']) == 2)
+check("样本<20 笔时判定=积累中",
+      all(v['verdict'] == '⏳ 样本积累中' for v in ev1['variants'] + ev2['variants']
+          if v['n_trades'] < 20))
+cards = qd.get_vol_gate_cards()
+check("S1bV/S2V 卡片2张且引擎接入态", len(cards) == 2 and '门控就绪' in cards[0]['verdict'])
+# 8.6 错杀候选视图
+cand = qd.get_s3_candidates_view(days=45)
+check("候选视图行含三条件布尔且 candidate=C1∧C2∧C3",
+      all(isinstance(r['candidate'], bool)
+          and r['candidate'] == (r['C1'] and r['C2'] and r['C3']) for r in cand['rows']))
+# 8.7 读路径无DDL
+for fn in (qd.get_s3_candidates_view, qd._load_gate_context, qd.evaluate_vol_gate):
+    check(f"{fn.__name__} 无DDL", 'CREATE TABLE' not in inspect.getsource(fn))
+
+print()
+print("=" * 66)
+print(f"模块12 测试汇总: {ok} 通过 / {len(fail)} 失败")
 if fail:
     for f_ in fail:
         print(f"  ✗ {f_}")

@@ -3392,6 +3392,7 @@ elif page == "量化分析":
                            'verdict': '🟡 前向样本裁决中'})
             # S3 预注册变体卡片(模块12 P0, 2026-09-15): P1财报日历就绪前静态展示
             _cards += quant_data.get_s3_prereg_cards()
+            _cards += quant_data.get_vol_gate_cards()
             st.markdown("**悬置假设进度卡片**（D1 · 完成 20 笔交易后裁决；规则回读见表下）")
             _wl_extra = {w['strategy_id']: w for w in _wl}
             _cols = st.columns(3)
@@ -3626,6 +3627,53 @@ elif page == "量化分析":
             st.caption(_mx['legend'])
         except Exception as e:
             st.error(f"双日历保护矩阵读取失败: {e}")
+
+        # ---------- ⑪ 错杀候选实时标记 (模块12 P2 · D3后半) ----------
+        try:
+            _cand = quant_data.get_s3_candidates_view()
+            st.markdown("**⑪ 错杀候选实时标记**（模块 12 · S1a/S2 触发族的错杀三条件逐项判定）")
+            if _cand['rows']:
+                _cand_df = pd.DataFrame([{
+                    "日期": r['date'], "代码": r['code'], "信号": r['signal'],
+                    "C1 事件空白": "✓" if r['C1'] else "✗",
+                    "C2 超卖": "✓" if r['C2'] else "✗",
+                    f"C3 财报远期(≥10td)": "✓" if r['C3'] else "✗",
+                    "RSI14": r['rsi14'], "下次财报": r['next_e1'] or "未知",
+                    "判定": "🟢 错杀候选" if r['candidate'] else "— 按普通下跌处理",
+                } for r in _cand['rows']])
+                st.dataframe(_cand_df, use_container_width=True, hide_index=True, height=280)
+                _n_cand = sum(1 for r in _cand['rows'] if r['candidate'])
+                st.caption(f"近 {_cand['window_days']} 天触发 {len(_cand['rows'])} 条"
+                           f"（截至 {_cand['asof']}），错杀候选 {_n_cand} 条；"
+                           f"C3 对「下次财报未知」保守拒绝（排期发布后自动放开）；"
+                           f"三条件口径冻结于 模块12开发计划.md 二.2")
+            else:
+                st.info(f"近 {_cand['window_days']} 天无 S1a/S2 触发族信号")
+        except Exception as e:
+            st.error(f"错杀候选视图读取失败: {e}")
+
+        # ---------- ⑫ 门控变体裁决读数 (模块12 P2 + 波动域门控 P1) ----------
+        try:
+            st.markdown("**⑫ 门控变体裁决读数**（S1aE/S2E 事件门控 · S1bV/S2V 波动域门控；"
+                        "各 ≥20 笔前向完成交易后按预注册规则裁决）")
+            _g1 = quant_data.evaluate_s3_event()
+            _g2 = quant_data.evaluate_vol_gate()
+            _grows = []
+            for v in _g1['variants'] + _g2['variants']:
+                _grows.append({
+                    "变体": v['variant'], "原版": v['parent'],
+                    "完成交易": f"{v['n_trades']}/{v['min_trades']}",
+                    "超额vs B1": (f"{v['excess_vs_b1']:+.2%}"
+                                  if v.get('excess_vs_b1') is not None else "—"),
+                    "原版超额": (f"{v['parent_excess']:+.2%}"
+                                if v.get('parent_excess') is not None else "—"),
+                    "判定": v['verdict'],
+                })
+            st.dataframe(pd.DataFrame(_grows), use_container_width=True, hide_index=True)
+            st.caption(f"协议：{_g1['protocol']} · {_g2['protocol']}；回测段数字均为机制对照"
+                       "（选择泄漏）非证据；门控只做减法，样本积累慢于原版属预期")
+        except Exception as e:
+            st.error(f"门控变体裁决读数失败: {e}")
 
 elif page == "数据库浏览":
     import tracker

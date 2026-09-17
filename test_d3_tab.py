@@ -9,7 +9,7 @@ S1b持有5日出场更快、新端点下复利占优), S1a超额42.22pp, S1e+9.3
 (美股09-15行情终局到达+B1端点移动+当日批次重生: S2超额68.21pp回到居首,
 S1a超额43.27pp, S1e+10.41pp; 居首随端点在S1b/S2间翻转属已知模式) → 09-16 二次重钉
 (17:41补跑管道吸收当日到货港股/指数端点后当日批次再生: 仅S1a 43.27→43.75pp漂移,
-S2居首/S1e不变) —
+S2居首/S1e不变) → 09-18 门控批次重钉(12策略+S1aE/S2E/S1bV/S2V四门控变体: S1aM超额58.67pp微弱居首, S1a 43.23pp, S1e+5.99pp; 费率脆弱=S1aE/S1d/S2E) —
 单点读数随端点漂移属已知模式, 唯一稳定裁决仍是前向测试
 注意: test_module5 每次运行会重生成当日批次(run_d2_backtests 同日覆盖), 行情刷新后
 B1(恒满仓)端点移动而空仓策略不动 → 超额期望值以"数据刷新后重生成"的批次为准"""
@@ -111,7 +111,8 @@ def _bt_curve(sid, seg):
     return [p[0] for p in pts], [p[1] for p in pts]
 
 check(f"策略集 {n_strat} 个 {bt_strats}",
-      bt_strats == ['S1a', 'S1aM', 'S1b', 'S1c', 'S1d', 'S1e', 'S2', 'S2M'])
+      bt_strats == ['S1a', 'S1aE', 'S1aM', 'S1b', 'S1bV', 'S1c', 'S1d', 'S1e',
+                    'S2', 'S2E', 'S2M', 'S2V'])  # 门控批次(2026-09-18)+4变体
 check(f"fee0 run 索引 {n_strat + 2} 组({n_strat}策略+双基准)×2段",
       len(run_meta) == (n_strat + 2) * 2, f"实际 {len(run_meta)}")
 
@@ -170,8 +171,8 @@ check("数值列 dtype 均为数值型 int64/float64 (无 object 混型, Arrow �
           for c in cmp_df.columns if c != '对象'))
 s1a = cmp_df[cmp_df['对象'].str.startswith('S1a ')].iloc[0]
 check(f"S1a OOS收益 40.26 (实际 {s1a['OOS收益%']})", abs(s1a['OOS收益%'] - 40.26) < 0.01)
-check(f"S1a OOS超额vsB1 43.75pp (实际 {s1a['OOS超额vsB1(pp)']})",
-      abs(s1a['OOS超额vsB1(pp)'] - 43.75) < 0.01)
+check(f"S1a OOS超额vsB1 43.23pp (实际 {s1a['OOS超额vsB1(pp)']})",
+      abs(s1a['OOS超额vsB1(pp)'] - 43.23) < 0.01)
 
 print("[6] 费率敏感性图构建")
 fig_fee = make_subplots(rows=1, cols=2, subplot_titles=("full 段", "oos 段"))
@@ -219,12 +220,12 @@ conclusions = []
 oos_strats = [(_bt_run(sid, 'oos'), sid) for sid in bt_strats]
 oos_valid = [(r, sid) for r, sid in oos_strats if r and r['excess_vs_bh'] is not None]
 best_r, best_sid = max(oos_valid, key=lambda x: x[0]['excess_vs_bh'])
-check(f"样本外最强 = S2 (5股池09-16批次S2超额68.21pp居首, 实际 {best_sid})", best_sid == 'S2')
+check(f"样本外最强 = S1aM (09-18门控批次12策略, S1aM超额58.67pp微弱居首, 实际 {best_sid})", best_sid == 'S1aM')
 oos_fee3 = [(_bt_run(sid, 'oos', 0.003), sid) for sid in bt_strats]
 fee_fragile = [sid for r, sid in oos_fee3
                if r and r['total_return'] is not None and r['total_return'] <= 0]
-check(f"费率脆弱名单 = 仅S1d (5股池oos费后仅S1d为负, 实际 {fee_fragile})",
-      fee_fragile == ['S1d'])
+check(f"费率脆弱名单 = S1aE/S1d/S2E (门控变体笔数少费后为负属预期, 实际 {fee_fragile})",
+      fee_fragile == ['S1aE', 'S1d', 'S2E'])
 zero_trig = [sid for r, sid in oos_strats if not r or not r['n_triggers']]
 check(f"S3删除后全部策略 oos 段均有触发, 「无法样本外验证」结论不再触发 (实际零触发: {zero_trig})",
       not zero_trig)
@@ -232,8 +233,8 @@ s2_oos = _bt_run('S2', 'oos')
 check(f"S2 oos 满仓拒率>30% 触发容量约束结论 (实际 {s2_oos['n_rejected']}/{s2_oos['n_triggers']})",
       s2_oos['n_rejected'] / s2_oos['n_triggers'] > 0.3)
 s1e_oos = _bt_run('S1e', 'oos')
-check(f"S1e oos 超额 +10.41pp (5股池批次; 冻结协议: 回测不改观察状态, 裁决=前向)",
-      abs(s1e_oos['excess_vs_bh'] - 0.1041) < 0.005
+check(f"S1e oos 超额 +5.99pp (5股池批次; 冻结协议: 回测不改观察状态, 裁决=前向)",
+      abs(s1e_oos['excess_vs_bh'] - 0.0599) < 0.005
       and quant_data.BT_STRATEGIES['S1e'].get('observation') is True)
 check("协议字段齐备", all(k in proto for k in
       ['knowledge_cutoff', 'freeze_date', 'honesty_note', 'freeze_rule']))
