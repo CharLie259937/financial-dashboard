@@ -1357,9 +1357,13 @@ elif page == "量化分析":
     # --- Tab 3: 事件管理 ---
     with quant_tab3:
         st.subheader("主动事件管理")
+        st.warning("⚠️ **门控联动提示（模块12）**: 本表任何事件都会计入错杀条件 C1「事件空白」判定——"
+                   "添加事件会抑制 S1aE/S2E 事件门控变体的开仓（触发前5个交易日内有事件即拒绝）。"
+                   "财报/公告类结构化事件请使用「数据采集 → 📅 财报日历」（earnings_calendar 表, 不进 C1）。"
+                   "C1 口径冻结于模块12开发计划.md, 本提示不改判定逻辑")
 
         # 添加事件
-        with st.expander("添加主动事件", expanded=True):
+        with st.expander("添加主动事件（人工标注 · 类型已收敛防门控污染）", expanded=True):
             ec1, ec2, ec3 = st.columns(3)
             with ec1:
                 ev_code = st.text_input("股票代码", key="ae_code")
@@ -1372,10 +1376,10 @@ elif page == "量化分析":
             ec4, ec5 = st.columns(2)
             with ec4:
                 ev_type = st.selectbox("事件类型", [
-                    "earnings", "policy", "industry", "announcement", "dividend", "macro"
+                    "dividend", "custom"
                 ], format_func=lambda x: {
-                    "earnings": "财报", "policy": "政策", "industry": "行业新闻",
-                    "announcement": "公司公告", "dividend": "分红", "macro": "宏观经济"
+                    "dividend": "分红（C1 认定的生效事件类型）",
+                    "custom": "自定义标注（人工备注, 同样计入 C1）"
                 }[x], key="ae_type")
             with ec5:
                 ev_subtype = st.text_input("事件子类型", placeholder="如 季报/降息/并购", key="ae_subtype")
@@ -1411,7 +1415,7 @@ elif page == "量化分析":
         events = quant_data.get_active_events(limit=500)
         if events:
             ev_type_map = {"earnings":"财报","policy":"政策","industry":"行业",
-                           "announcement":"公告","dividend":"分红","macro":"宏观"}
+                           "announcement":"公告","dividend":"分红","macro":"宏观","custom":"自定义"}
             ev_dir_map = {"positive":"利好","negative":"利空","neutral":"中性"}
             ev_level_map = {"critical":"重大","major":"一般","minor":"轻微"}
 
@@ -1652,6 +1656,9 @@ elif page == "量化分析":
         # --- 估值数据可视化 ---
         st.divider()
         st.subheader("估值数据概览")
+        st.caption("ℹ️ 已知数据缺口：PE/PB 字段在模块8 回填段（2021 起）全部为零——akshare 日线接口不提供估值列，"
+                   "仅 2026-08 前旧采集期有值（已知缺口#5）。本区图表可能长期为空，字段启用需先解决数据源；"
+                   "估值分位门控（树杈第三层候选）依赖此项审计")
 
         val_summary = quant_data.get_valuation_summary()
         val_stocks = [s for s in val_summary if s['pe_ratio'] > 0 or s['pb_ratio'] > 0]
@@ -2561,6 +2568,36 @@ elif page == "量化分析":
                            "S*M 的 full/oos 结果均只演示封锁机制本身; 交易差为负≠纯封锁数, 因封锁释放槽位后"
                            "后续触发可入场(槽位级联)。唯一干净裁决 = 📡 前向跟踪页的 overlay 并行对照")
 
+            # ---- ④c 门控变体机制对照 (模块12 P2 + 波动域门控, 2026-09-18) ----
+            _gate_pairs = [(m, p) for m, p in (('S1aE', 'S1a'), ('S2E', 'S2'),
+                                               ('S1bV', 'S1b'), ('S2V', 'S2'))
+                           if _bt_run(m, 'full') or _bt_run(m, 'oos')]
+            if _gate_pairs:
+                st.write("**④c 门控变体机制对照** (SxE=事件门控C1/C2/C3 · SxV=波动域门控σ20年化≥80%)")
+                gv_rows = []
+                for m_id, p_id in _gate_pairs:
+                    for seg in ('full', 'oos'):
+                        mr, pr = _bt_run(m_id, seg), _bt_run(p_id, seg)
+                        if not (mr and pr):
+                            continue
+                        gv_rows.append({
+                            '对照': f"{m_id} vs {p_id}", '段': seg,
+                            '原版收益%': _n(pr['total_return']),
+                            '门控版收益%': _n(mr['total_return']),
+                            '收益差pp': _n((mr['total_return'] or 0)
+                                           - (pr['total_return'] or 0)) if (mr['total_return'] is not None and pr['total_return'] is not None) else None,
+                            '原版笔数': pr['n_trades'], '门控版笔数': mr['n_trades'],
+                        })
+                if gv_rows:
+                    gv_df = pd.DataFrame(gv_rows)
+                    for c in ['原版收益%', '门控版收益%', '收益差pp', '原版笔数', '门控版笔数']:
+                        gv_df[c] = pd.to_numeric(gv_df[c], errors='coerce')
+                    st.dataframe(gv_df, use_container_width=True, hide_index=True)
+                st.warning("**机制对照, 非证据**: 门控条件(错杀三条件/σ20≥80%)由含知识截止后数据的研究"
+                           "归纳(选择泄漏), SxE/SxV 的 full/oos 结果只演示门控机制本身——门控只做减法, "
+                           "拒掉的触发含正贡献属预期; C3 对「下次财报未知」保守拒绝(排期缺位期间 "
+                           "S1aE/S2E 成交为0属预注册行为)。唯一干净裁决 = 📡 前向跟踪页 ⑫ 门控变体裁决读数")
+
             st.write(f"**⑤ 绩效指标明细 · {bt_seg} 段 × 费率 {bt_fee * 100:.1f}%**")
             det_rows = []
             for sid in bt_strats + ['B1', 'B2']:
@@ -2761,8 +2798,9 @@ elif page == "量化分析":
                         f"({r['n_rejected'] / r['n_triggers'] * 100:.0f}%), 资金占用率 "
                         f"{(r['avg_fund_util'] or 0) * 100:.0f}% — 容量是组合策略收益第一决定因素")
             conclusions.append(
-                "**看空警示族单独说明**: 现行唯一「有效」族(MACD/KDJ死叉, 反向口径)引擎不做空, "
-                "其价值在第二阶段作为规避/减仓特征, 不在本页多头回测范围内")
+                "**看空警示族说明**: 死叉族曾为模块3·深化(2026-08)唯一有效警示族, 经模块8 扩窗重排"
+                "(4.6年样本)降级+信号瘦身(2026-09-11)已停采(零策略消费者), 历史行保留供研究; "
+                "警示类价值仅在第二阶段作为规避/减仓特征评估, 不在本页多头回测范围内")
             conclusions.append(
                 "**诚实性**: full 段收益为样本内复述(系统性高估), oos 段为回溯性伪样本外"
                 "(仅检验regime稳健性); 严格样本外 = 2026-09 起 forward test, 由看板每日数据自动累积")
@@ -2776,6 +2814,9 @@ elif page == "量化分析":
         st.subheader("埋点信号效果统计")
         st.caption("观察周期: 未来1/3/5/10日 · 随机基准对比 · 入选标准: 胜率>55% 且 盈亏比>1.2 且 样本≥30"
                    " · 看空信号采用反向口径: 胜率=看跌正确率, 对照随机下跌率基准")
+        st.caption("🬕 三镜头口径: 本页=全样本信号日收盘计价(研究口径) · 前向跟踪⑦=同口径滚动120日(健康度) · "
+                   "前向跟踪③/⑫=引擎T+1执行(业绩口径)——三处数字不同是设计使然。入选标准为2026-08-31冻结的"
+                   "绝对胜率口径, 牛市水分请看「超额」列(超额口径切换属预注册变更, 不得径改)")
 
         # --- 投资组合标注 ---
         try:
@@ -2857,12 +2898,24 @@ elif page == "量化分析":
 
             # 有效信号池
             st.divider()
+            # 瘦身状态注入(P1一致性优化 2026-09-18): 信号效果统计须展示采集状态, 消除
+            # "唯一有效却已停采"的误导(有效池达标组中停采子类占比警示)
+            _sl_map = {}
+            for _st_key, _tag in (('keep', '🟢 采集中'), ('stopped', '⛔ 已停采'),
+                                  ('phase2', '🟡 二期停采')):
+                for _t, _s in quant_data.SIGNAL_STREAMLINE.get(_st_key, []):
+                    _sl_map[( _t, _s)] = _tag
+
+            def _sl_status(sig_str):
+                _parts = sig_str.split('|')
+                return _sl_map.get((_parts[0], _parts[1]), '—')
             st.write("**核心有效信号池**")
             pool = m3["pool"]
             pool_df = pd.DataFrame([{
                 "信号": f"{p['signal_type']}|{p['signal_subtype']}",
                 "方向": p["direction"],
                 "口径": "反向" if p.get("eval_mode") == "reverse" else "正向",
+                "采集状态": _sl_status(f"{p['signal_type']}|{p['signal_subtype']}"),
                 "状态": p["status"],
                 "优势周期": p.get("best_period", "—"),
                 "胜率%": p.get("best_win_rate", "—"),
@@ -2873,6 +2926,12 @@ elif page == "量化分析":
                 "样本量": p["total_signals"],
             } for p in pool])
             st.dataframe(pool_df, use_container_width=True, hide_index=True)
+            _eff = pool_df[pool_df['状态'].astype(str).str.startswith('有效')]
+            _eff_stopped = _eff[_eff['采集状态'] == '⛔ 已停采']
+            if len(_eff_stopped):
+                st.warning(f"⚠️ 当期达标「有效」组 {len(_eff_stopped)}/{len(_eff)} 已停采"
+                           f"（零策略消费者, 2026-09-11 瘦身决策）——历史统计有效≠现行采集, "
+                           f"现行策略消费的信号族见「前向跟踪⑧ 信号采集瘦身」")
             st.caption("反向口径行: 胜率=看跌正确率, 平均收益=平均跌幅, 盈亏比=平均跌幅/平均反弹幅度 · "
                        "「观察(验证中)」= RSI24 并行观察信号: 未通过时间分割预注册规则前不转正 · "
                        "「有效(时间分割通过)」/「淘汰(时间分割未过)」由模块8预注册规则裁决(见下方)")
@@ -2928,8 +2987,10 @@ elif page == "量化分析":
             sig_rows = []
             for r in passive_sel:
                 for n, st_ in r["stats"].items():
+                    _sig = f"{r['signal_type']}|{r['signal_subtype']}"
                     sig_rows.append({
-                        "信号": f"{r['signal_type']}|{r['signal_subtype']}",
+                        "信号": _sig,
+                        "采集状态": _sl_status(_sig),
                         "方向": r["direction"],
                         "口径": "反向" if st_.get("eval_mode") == "reverse" else "正向",
                         "周期": f"{n}日",
@@ -2946,11 +3007,20 @@ elif page == "量化分析":
                         "最大盈亏%": f"{st_['max_win']:.2f} / {st_['max_loss']:.2f}",
                     })
             if sig_rows:
-                st.dataframe(pd.DataFrame(sig_rows), use_container_width=True, hide_index=True,
+                _sig_df = pd.DataFrame(sig_rows)
+                _order = {'🟢 采集中': 0, '🟡 二期停采': 1, '⛔ 已停采': 2, '—': 3}
+                _sig_df['_ord'] = _sig_df['采集状态'].map(_order).fillna(3)
+                _sig_df = _sig_df.sort_values(['_ord', '信号', '周期']).drop(columns='_ord')
+                _show_stopped = st.toggle("显示已停采子类（历史研究可查, 默认折叠）",
+                                          value=False, key="m3_show_stopped")
+                if not _show_stopped:
+                    _sig_df = _sig_df[_sig_df['采集状态'] != '⛔ 已停采']
+                st.dataframe(_sig_df, use_container_width=True, hide_index=True,
                              height=400)
                 st.caption("正向口径: 达标数=上涨次数, 平均收益=平均涨幅 · "
                            "反向口径(看空): 达标数=下跌次数, 胜率=看跌正确率, "
-                           "平均收益=平均跌幅, 基准=随机下跌率, 盈利均值=平均跌幅, 亏损均值=平均反弹")
+                           "平均收益=平均跌幅, 基准=随机下跌率, 盈利均值=平均跌幅, 亏损均值=平均反弹 · "
+                           "已停采子类历史行保留(replay 全量生成保证可复现), live 不再新增")
 
                 # 胜率对比图
                 st.write("**各信号胜率 vs 随机基准**")
