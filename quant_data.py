@@ -2604,6 +2604,93 @@ VOL_GATE_PREREG = {
     'doc': '波动域门控变体预注册.md',
 }
 
+# 槽位扩容变体(预注册冻结 2026-09-19, 槽位扩容变体预注册.md 权威)
+SLOT_PREREG = {
+    'registered': '2026-09-19',
+    'variants': [
+        {'strategy_id': 'S2K6', 'parent_id': 'S2',
+         'name': '变体·超跌反弹持有5日·槽位扩容K6'},
+    ],
+    'sizing': [('K', '并发槽位', 'max_pos=6(每槽1/6独立复利), 唯一差异=槽位数; '
+                              '触发/持有/费率与原版完全一致')],
+    'adjudication': {
+        'min_trades': 20,
+        'rules': ('S2K6完成>=20笔前向交易后与S2并行对照: 超额vs B1<=0 → 淘汰建议; '
+                  '超额>0但<=原版 → 无增量淘汰; 超额>0且>原版且胜率>=原版 → 转正候选; '
+                  '其余继续观察'),
+        'freeze_note': ('裁决规则预注册于 2026-09-19(槽位扩容变体预注册.md 三), '
+                        '不得依前向结果修改'),
+    },
+    'evidence_note': ('K敏感性稳健事实: S2拒单51%→K6约22%, 回撤单调改善; '
+                      '总收益K曲线被事后股污染(S1研究), 禁止作为资金配置依据引用; '
+                      '与S2V构成"扩容vs滤波"并行对照'),
+    'discipline': '资金维度一次只裁决一个(S2VW波动率倒数槽位等S2K6裁决后另立预注册)',
+    'doc': '槽位扩容变体预注册.md',
+}
+
+
+def register_slot_start(date_iso=None, log=print):
+    """槽位扩容引擎接入交付当日登记计数起点(槽位扩容变体预注册.md 三):
+    写 forward_meta.slot_protocol(独立键, DELETE+INSERT 幂等)"""
+    conn = get_db()
+    create_forward_tables(conn)
+    date_iso = date_iso or datetime.now().strftime('%Y-%m-%d')
+    payload = {
+        'preregistered': SLOT_PREREG['registered'],
+        'variants': [v['strategy_id'] for v in SLOT_PREREG['variants']],
+        'sizing': SLOT_PREREG['sizing'],
+        'adjudication': SLOT_PREREG['adjudication'],
+        'forward_count_start': date_iso,
+        'note': ('引擎接入交付当日登记; 起点日之前的 S2K6 触发不入样本; '
+                 'K6与K3前向触发集相同但完成笔数不同(拒单差), 并行对照按各自完成交易统计'),
+        'registered_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+    }
+    conn.execute("DELETE FROM forward_meta WHERE meta_key='slot_protocol'")
+    conn.execute("INSERT INTO forward_meta(meta_key, result_json, run_date, generated_at) "
+                 "VALUES(?,?,?,?)",
+                 ('slot_protocol', json.dumps(payload, ensure_ascii=False),
+                  datetime.now().strftime('%Y-%m-%d'), payload['registered_at']))
+    conn.commit()
+    conn.close()
+    log(f"[slot] slot_protocol 前向计数起点已登记: {date_iso}")
+    return payload
+
+
+def get_slot_cards():
+    """S2K6 预注册卡片(D1悬置假设区): 引擎接入后显示计数起点与进度"""
+    conn = get_db()
+    reg, prog = None, 0
+    try:
+        r = conn.execute("SELECT result_json FROM forward_meta WHERE "
+                         "meta_key='slot_protocol' ORDER BY id DESC LIMIT 1").fetchone()
+        if r:
+            reg = json.loads(r[0])
+        prog = conn.execute("SELECT COUNT(*) FROM forward_trades WHERE "
+                            "strategy_id='S2K6'").fetchone()[0]
+    except sqlite3.OperationalError:
+        pass
+    finally:
+        conn.close()
+    out = []
+    for v in SLOT_PREREG['variants']:
+        if reg:
+            note = (f"槽位扩容(K=6, 每槽1/6复利): {v['parent_id']}原版触发不动, "
+                    f"计数起点 {reg['forward_count_start']}, 前向完成 {prog}/20 笔")
+            verdict = '🔵 槽位变体就绪·样本积累中'
+        else:
+            note = f"槽位扩容预注册: {v['parent_id']}+K6(每槽1/6), 待引擎接入"
+            verdict = '🔵 预注册·待引擎接入'
+        out.append({'strategy_id': v['strategy_id'], 'name': v['name'], 'note': note,
+                    'n_trades': prog, 'min_trades': 20, 'verdict': verdict})
+    return out
+
+
+def evaluate_slot_variant():
+    """槽位扩容前向裁决读数(规则冻结于槽位扩容变体预注册.md 三)"""
+    return _evaluate_gate_variants(
+        [('S2K6', 'S2')],
+        'forward_meta.slot_protocol(预注册 2026-09-19)')
+
 GATE_VOL_ANNUAL = 0.80              # C-V: σ20(T-1) 年化阈值(冻结)
 GATE_C1_WINDOW = 5                  # C1: 前N个交易日(含T)无生效主动事件
 GATE_C2_RSI = 30.0                  # C2: 触发日 RSI14 下限
@@ -3779,6 +3866,13 @@ BT_STRATEGIES = {
             'match': [('boll_break', '跌破下轨'), ('price_limit', '大跌'),
                       ('rsi_oversold', '超卖')], 'hold': 5, 'vol_gate': True,
             'fwd_start': '2026-09-18'},
+    # 槽位扩容变体(预注册冻结 2026-09-19, 槽位扩容变体预注册.md 权威):
+    # 唯一差异=并发槽位K=6(每槽1/6复利); 与S2V构成"扩容vs滤波"并行对照;
+    # K扫描总收益曲线被事后股污染, 仅采纳拒单率/回撤/夏普稳健事实
+    'S2K6': {'name': '变体·超跌反弹持有5日·槽位扩容K6',
+             'match': [('boll_break', '跌破下轨'), ('price_limit', '大跌'),
+                       ('rsi_oversold', '超卖')], 'hold': 5, 'max_pos': 6,
+             'fwd_start': '2026-09-19'},
 }
 
 # D2.0 知识截止日协议(冻结于 2026-08-31, 详见 模块5开发计划.md):
@@ -4083,6 +4177,10 @@ def run_backtest(strategy_id, max_pos=BT_MAX_POSITIONS, fee=BT_FEE,
         blocked_days = _load_overlay_blocked(data)
     if not spec.get('overlay'):
         blocked_days = None
+    # 槽位扩容变体(2026-09-19): spec级max_pos覆盖全局默认(未声明则用参数值,
+    # 原版策略无该键 → 行为逐位不变)
+    if spec.get('max_pos'):
+        max_pos = spec['max_pos']
     gate_fn = None
     if spec.get('vol_gate') or spec.get('event_gate'):
         gate_fn = _make_gate_fn(spec, gate_ctx if gate_ctx is not None
@@ -5137,8 +5235,10 @@ def run_forward_step(log=print):
         # 门控批次: 事件/波动域门控函数(上下文已预载)
         gate_fn = _make_gate_fn(spec, gate_ctx, fwd)
         # 前向口径(2026-09-07 修复): 出场日未到的持仓盯市不丢弃 — 空仓1.0是引擎缺陷产物
+        # 槽位扩容变体(2026-09-19): spec级max_pos覆盖全局默认
         res = _run_strategy_bt(fwd, triggers, spec['hold'],
-                               BT_MAX_POSITIONS, FORWARD_FEE, blocked_days=blocked,
+                               spec.get('max_pos', BT_MAX_POSITIONS), FORWARD_FEE,
+                               blocked_days=blocked,
                                drop_incomplete=False, gate_fn=gate_fn)
         metrics = _perf_metrics(res['equity'][:len(cal_stock)], cal_stock,
                                 res['trades'], res['fund_util'])

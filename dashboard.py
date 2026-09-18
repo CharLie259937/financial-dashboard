@@ -3498,6 +3498,7 @@ elif page == "量化分析":
             # S3 预注册变体卡片(模块12 P0, 2026-09-15): P1财报日历就绪前静态展示
             _cards += quant_data.get_s3_prereg_cards()
             _cards += quant_data.get_vol_gate_cards()
+            _cards += quant_data.get_slot_cards()
             st.markdown("**悬置假设进度卡片**（D1 · 完成 20 笔交易后裁决；规则回读见表下）")
             _wl_extra = {w['strategy_id']: w for w in _wl}
             _cols = st.columns(3)
@@ -3788,8 +3789,9 @@ elif page == "量化分析":
                         "各 ≥20 笔前向完成交易后按预注册规则裁决）")
             _g1 = quant_data.evaluate_s3_event()
             _g2 = quant_data.evaluate_vol_gate()
+            _g3 = quant_data.evaluate_slot_variant()
             _grows = []
-            for v in _g1['variants'] + _g2['variants']:
+            for v in _g1['variants'] + _g2['variants'] + _g3['variants']:
                 _grows.append({
                     "变体": v['variant'], "原版": v['parent'],
                     "完成交易": f"{v['n_trades']}/{v['min_trades']}",

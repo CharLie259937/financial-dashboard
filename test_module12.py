@@ -205,7 +205,7 @@ print("=" * 66)
 print("[8] 门控批次(模块12 P2 事件门控 + 波动域门控 P1, 2026-09-18)")
 print("=" * 66)
 # 8.1 注册表
-check(f"策略集 12 个(含4门控变体)", len(qd.BT_STRATEGIES) == 12)
+check(f"策略集 13 个(含4门控+1槽位变体)", len(qd.BT_STRATEGIES) == 13)
 for vid, pid in [('S1aE', 'S1a'), ('S2E', 'S2'), ('S1bV', 'S1b'), ('S2V', 'S2')]:
     v, p = qd.BT_STRATEGIES[vid], qd.BT_STRATEGIES[pid]
     check(f"{vid} 与原版 {pid} match/hold 完全一致(唯一差异=门控)",
