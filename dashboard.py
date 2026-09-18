@@ -2300,6 +2300,22 @@ elif page == "量化分析":
                             st.caption("台账刷新由每日管道执行(守卫=完整性截断日, 已入库净值日期永不回补封锁); "
                                        "配置冻结后宏观研究重跑不自动更新 overlay(需新的预注册决策)")
 
+        # ---- ⑧ 危机窗相关性 (O2 · 跨市场报告批判性学习采纳项 2026-09-18) ----
+        try:
+            _cc = quant_data.get_crisis_corr_view()
+            if _cc.get('error'):
+                st.info(_cc['error'])
+            else:
+                st.write(f"**危机窗相关性**（三指数 · 重叠样本 {_cc['sample'][0]} ~ {_cc['sample'][1]} "
+                         f"共 {_cc['sample'][2]} 日 · Longin-Solnik 框架）")
+                _cc_rows = [{'窗口': '全样本', 'n': _cc['sample'][2], **_cc['full']}]
+                _cc_rows += [{'窗口': w['name'], 'n': w['n'], **w['corr']}
+                             for w in _cc['windows']]
+                st.dataframe(pd.DataFrame(_cc_rows), use_container_width=True, hide_index=True)
+                st.caption(_cc['note'])
+        except Exception as e:
+            st.error(f"危机窗相关性读取失败: {e}")
+
     # --- Tab 7: 策略回测 (模块5: D1引擎 + D2双段批量回测) ---
     # 渲染次序说明: 本块置于 Tab 6(含st.stop)之前, 与 Tab 8 同理; 且本块自身
     # 全程条件渲染, 任何分支都不使用 st.stop(), 保证8个标签页均能完整渲染
@@ -3022,6 +3038,25 @@ elif page == "量化分析":
                            "平均收益=平均跌幅, 基准=随机下跌率, 盈利均值=平均跌幅, 亏损均值=平均反弹 · "
                            "已停采子类历史行保留(replay 全量生成保证可复现), live 不再新增")
 
+                # --- O1: 分市场分层(跨市场报告批判性学习采纳项 2026-09-18) ---
+                try:
+                    _ms = quant_data.get_signal_market_split_view()
+                    st.write(f"**分市场分层**（keep-5 家族 · 持有{_ms['hold']}日 · "
+                             "市场为二阶因子, 一阶=波动域已门控 S1bV/S2V）")
+                    _ms_rows = []
+                    for _mk, _d in _ms['markets'].items():
+                        for _r in _d['rows']:
+                            _ms_rows.append({
+                                "市场": _mk, "家族": _r['family'], "n": _r['n'],
+                                "胜率%": _r['win_rate'], "基准%": _r['baseline'],
+                                "超额pp": _r['excess'],
+                            })
+                    st.dataframe(pd.DataFrame(_ms_rows), use_container_width=True,
+                                 hide_index=True, height=260)
+                    st.caption(_ms['note'])
+                except Exception as e:
+                    st.error(f"分市场分层读取失败: {e}")
+
                 # 胜率对比图
                 st.write("**各信号胜率 vs 随机基准**")
                 fig_w = go.Figure()
@@ -3539,6 +3574,31 @@ elif page == "量化分析":
                 "新股回填的历史信号不追溯计入前向，前向样本自入池日起积累")
         except Exception as e:
             st.error(f"池构成面板读取失败: {e}")
+
+        # ---------- ③d 池透明度·选择偏差 (D2 · S1对照研究落地) ----------
+        try:
+            _pt = quant_data.get_pool_transparency_view()
+            st.markdown("**③d 池透明度 · 选择偏差**（D2：三时间线 + 事后入池标注 + 收益贡献占比；"
+                        "证据 = S1 池外对照研究 2026-09-15）")
+            _pt_df = pd.DataFrame([{
+                "代码": r['code'], "名称": r['name'], "类别": r['category'],
+                "行情起点": r['quotes_start'], "信号回放起点": r['signal_start'],
+                "入池时点": r['join_eff'], "偏差警示": r['bias_warning'],
+            } for r in _pt['rows']])
+            st.dataframe(_pt_df, use_container_width=True, hide_index=True)
+            _c = _pt['contribution']
+            _t1, _t2 = st.columns(2)
+            with _t1:
+                st.metric("事后标的占 S1a 收益贡献(最新批次)",
+                          f"{_c['S1a']['post_hoc_share']}%",
+                          help=f"批次 {_c['S1a']['batch']} · full 段 fee=0 逐股Σ收益"
+                               f"（S1 研究冻结值 83%）")
+            with _t2:
+                st.metric("事后标的占 S2 收益贡献",
+                          f"{_c['S2']['post_hoc_share']}%")
+            st.caption(_pt['note'])
+        except Exception as e:
+            st.error(f"池透明度面板读取失败: {e}")
 
         # ---------- ④ 净值曲线 ----------
         st.markdown("**④ 前向净值曲线**（策略 vs B1 等权买入持有 / B2 指数基准）")

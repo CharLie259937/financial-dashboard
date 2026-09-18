@@ -2847,6 +2847,164 @@ def get_s3_candidates_view(days=45):
     return {'rows': rows, 'window_days': days, 'asof': today}
 
 
+# ============================================================
+# D2+O1+O2 展示层批次(2026-09-18, 跨市场报告批判性学习采纳项 + 优化清单D2)
+# 全部只读路径(无DDL), 零冻结面触碰
+# ============================================================
+def get_pool_transparency_view():
+    """D2 池透明度(优化清单D2, 证据=S1池外对照研究 2026-09-15):
+    三时间线(行情起点/信号回放起点/入池时点) + '先有数据后入池'偏差标注 +
+    事后标的对池收益的贡献占比(随最新批次更新)"""
+    conn = get_db()
+    pool = {r['code']: dict(r) for r in conn.execute(
+        "SELECT code, market, name, is_active FROM stock_pool")}
+    first_join = {}
+    for r in conn.execute("SELECT code, MIN(eff_date) AS j FROM forward_pool_events "
+                          "WHERE event='join' GROUP BY code"):
+        first_join[r['code']] = r['j']
+    quotes_start = {r['code']: r['s'] for r in conn.execute(
+        "SELECT code, MIN(trade_date) AS s FROM daily_quotes GROUP BY code")}
+    sig_start = {r['code']: r['s'] for r in conn.execute(
+        "SELECT code, MIN(trade_date) AS s FROM passive_signals GROUP BY code")}
+    rows = []
+    for code, p in pool.items():
+        j = first_join.get(code, FORWARD_START)
+        replay_since = max(REPLAY_START, sig_start.get(code, REPLAY_START))
+        cat = '原始首批' if j <= FORWARD_START else '事后入池'
+        bias = (cat == '事后入池' and replay_since < j)
+        rows.append({
+            'code': code, 'market': p['market'], 'name': p['name'],
+            'active': bool(p['is_active']), 'category': cat,
+            'quotes_start': quotes_start.get(code),
+            'signal_start': sig_start.get(code), 'join_eff': j,
+            'replay_days_before_join': None if j <= FORWARD_START else j,
+            'bias_warning': '⚠️ 回放段含选择偏差' if bias else '低（观察清单/首批）',
+        })
+    rows.sort(key=lambda r: (r['category'] != '原始首批', r['code']))
+    # 贡献占比: 最新批次 S1a/S2 fee=0 full 段逐股 Σ收益 → 事后股份额(S1研究口径)
+    contrib = {}
+    batch = conn.execute("SELECT MAX(run_date) FROM backtest_runs").fetchone()[0]
+    for sid in ('S1a', 'S2'):
+        per = {r['code']: r['s'] for r in conn.execute(
+            "SELECT t.code, SUM(t.return_pct) AS s FROM backtest_trades t "
+            "JOIN backtest_runs r ON t.run_id=r.run_id "
+            "WHERE r.run_date=? AND r.segment='full' AND r.fee=0 AND t.strategy_id=? "
+            "GROUP BY t.code", (batch, sid))}
+        total = sum(per.values())
+        post = sum(v for c, v in per.items()
+                   if first_join.get(c, FORWARD_START) > FORWARD_START)
+        contrib[sid] = {'batch': batch, 'per_stock': per,
+                        'total_sum_ret': round(total, 2),
+                        'post_hoc_share': round(post / total * 100, 1) if total > 0 else None}
+    conn.close()
+    return {'rows': rows, 'contribution': contrib,
+            'first_batch': [r['code'] for r in rows if r['category'] == '原始首批'],
+            'note': ('S1研究结论: 池内S1a收益优势的83%来自事后入池的智谱/闪迪'
+                     '(选择偏差量化, 2026-09-15); 扩池候选先入观察组, ≥20笔前向信号后'
+                     '评估转正(三重验证: 池内+池外+前向)')}
+
+
+def get_signal_market_split_view(hold=5):
+    """O1: keep-5 家族分市场超额胜率(模块3信号口径; 2026-09-18 实证: 市场为二阶因子
+    ±2pp, 一阶=波动域12pp已门控S1bV/S2V)"""
+    conn = get_db()
+    pool_mkt = {r['code']: r['market'] for r in conn.execute(
+        "SELECT code, market FROM stock_pool WHERE is_active=1")}
+    data = {}
+    for code, m in pool_mkt.items():
+        rows2 = conn.execute(
+            "SELECT trade_date, close FROM daily_feature_base "
+            "WHERE code=? AND close IS NOT NULL ORDER BY trade_date", (code,)).fetchall()
+        data[code] = (m, [r['trade_date'] for r in rows2],
+                      [r['close'] for r in rows2])
+    keep5 = {f"{t}/{s}" for t, s in SIGNAL_STREAMLINE['keep']}
+    sig5 = {}
+    for r in conn.execute("SELECT DISTINCT code, trade_date, signal_type, signal_subtype "
+                          "FROM passive_signals"):
+        key = (r['code'], r['trade_date'])
+        if r['code'] in pool_mkt and f"{r['signal_type']}/{r['signal_subtype']}" in keep5:
+            sig5.setdefault(key, set()).add(
+                f"{r['signal_type']}/{r['signal_subtype']}")
+    conn.close()
+    fams = sorted(keep5)
+    out = {'hold': hold, 'markets': {}, 'families': fams,
+           'note': ('口径: 信号日收盘计价持有%d交易日收盘对收盘(模块3); 基准=该市场全日'
+                    '同持有期胜率; 市场差异≈2pp为二阶因子, 波动域差异≈12pp为一阶'
+                    '(已门控 S1bV/S2V)' % hold)}
+    for m in ('A股', '港股', '美股'):
+        fam_stat = {f: [0, 0] for f in fams}
+        bl = [0, 0]
+        for code, (mk, dates, closes) in data.items():
+            if mk != m:
+                continue
+            pos = {d: i for i, d in enumerate(dates)}
+            for i in range(len(closes) - hold):
+                bl[0] += 1 if closes[i + hold] / closes[i] - 1 > 0 else 0
+                bl[1] += 1
+            for (c, d), fs in sig5.items():
+                if c != code or d not in pos:
+                    continue
+                i = pos[d]
+                if i + hold >= len(closes):
+                    continue
+                for f in fs:
+                    fam_stat[f][0] += 1 if closes[i + hold] / closes[i] - 1 > 0 else 0
+                    fam_stat[f][1] += 1
+        bl_wr = bl[0] / bl[1] * 100 if bl[1] else None
+        rows_m = []
+        for f in fams + ['全家族']:
+            w, n = fam_stat.get(f, [0, 0]) if f != '全家族' else (
+                sum(v[0] for v in fam_stat.values()), sum(v[1] for v in fam_stat.values()))
+            wr_ = w / n * 100 if n else None
+            rows_m.append({'family': f, 'n': n, 'win_rate': round(wr_, 1) if wr_ is not None else None,
+                           'baseline': round(bl_wr, 1) if bl_wr is not None else None,
+                           'excess': round(wr_ - bl_wr, 1) if (wr_ is not None and bl_wr is not None) else None})
+        out['markets'][m] = {'baseline_n': bl[1], 'rows': rows_m}
+    return out
+
+
+CRISIS_WINDOWS = [('2015股灾', '2015-06-01', '2016-02-29'),
+                  ('2018熊市', '2018-01-01', '2018-12-31'),
+                  ('2020新冠', '2020-02-15', '2020-04-30'),
+                  ('2022加息熊', '2022-01-01', '2022-10-31'),
+                  ('2025-26近年', '2025-01-01', '2099-12-31')]
+
+
+def get_crisis_corr_view():
+    """O2: 三指数危机窗相关性(Longin-Solnik 检验读数, benchmark_index 重叠样本):
+    全样本 vs 危机子样本 —— CN-HK危机趋同证实(0.59→0.75-0.82), A股-美股即使熊市
+    也保持低位(2022年-0.02); 校准 B1/B2 回撤预期(分散保护在熊市打折的市场对)"""
+    import pandas as _pd
+    conn = get_db()
+    idx = {}
+    for m in ('A股', '港股', '美股'):
+        rows2 = conn.execute("SELECT trade_date, close FROM benchmark_index "
+                             "WHERE market=? ORDER BY trade_date", (m,)).fetchall()
+        idx[m] = _pd.Series([r['close'] for r in rows2],
+                            index=[r['trade_date'] for r in rows2], dtype=float)
+    conn.close()
+    df = _pd.DataFrame(idx).dropna()
+    if len(df) < 100:
+        return {'error': '基准指数重叠样本不足'}
+    ret = df.pct_change()
+    pairs = [('A股', '港股'), ('A股', '美股'), ('港股', '美股')]
+
+    def _corr(sub):
+        c = sub.corr()
+        return {f'{a}~{b}': round(float(c.loc[a, b]), 3) for a, b in pairs}
+    out = {'sample': [str(df.index[0]), str(df.index[-1]), len(df)],
+           'full': _corr(ret), 'windows': []}
+    for name, a, b in CRISIS_WINDOWS:
+        sub = ret.loc[a:b]
+        if len(sub) < 30:
+            continue
+        out['windows'].append({'name': name, 'n': len(sub), 'corr': _corr(sub)})
+    out['note'] = ('Longin-Solnik(2001)框架: 用危机窗对比全样本; 极端日粗口径(任一指数'
+                   '|日涨跌|>2%)不构成规范检验, 勿引用; 对 B1/B2 的含义: 沪深300~恒指'
+                   '的分散保护在熊市系统性打折, A股~美股分散即使在2022熊市仍稳固')
+    return out
+
+
 
 def detect_signals(df, code, market, name="", source="live"):
     signals = []
