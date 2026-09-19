@@ -7167,3 +7167,252 @@ def get_intraday_bars(code, trade_date, interval='60m'):
         "ORDER BY ts", (code, interval, trade_date))]
     conn.close()
     return bars
+
+
+# ============================================================
+# 池外对照月度例行化(S1研究建议落地, 2026-09-19) + A-H溢价纯观察(O4)
+# 纪律: 对照组行情只写 s1_control.db(生产库零污染); 漂移结果落生产库
+# control_drift 表(纯结果表, 不进任何分析管道); 大跌触发直接从行情计算
+# (chg<=-5%, 与冻结阈值同口径), 池/对照两侧同式计算保证可比
+# ============================================================
+CONTROL_GROUP = [   # S1研究预注册清单(2026-09-15, 先于回放确定, 未参考回测表现)
+    ('AMD', '美股', 'AMD超微'), ('MU', '美股', '美光科技'), ('INTC', '美股', '英特尔'),
+    ('03690', '港股', '美团'), ('09988', '港股', '阿里巴巴'), ('01810', '港股', '小米集团'),
+    ('002594', 'A股', '比亚迪'), ('601012', 'A股', '隆基绿能'),
+]
+CONTROL_DB_PATH = (r"C:\Users\lenovo\AppData\Roaming\TRAE SOLO CN\ModularData"
+                   r"\ai-agent\work-mode-projects\6a8453a88dd6b53cecf90b41"
+                   r"\strategy-research\s1_control.db")
+CONTROL_DRIFT_HOLD = 10          # 大跌持有期(与S1a信号口径一致)
+CONTROL_DRIFT_WINDOW = 45        # 漂移观察窗(日历日, 每次运行统计近窗)
+
+
+def _crash_stats_from_quotes(rows, window_start):
+    """大跌信号口径(chg<=-5%收盘计价, 持有CONTROL_DRIFT_HOLD交易日): 窗内已完成交易的
+    {n, win_rate, avg_ret} — 池/对照两侧同式调用, 口径可比"""
+    if not rows:
+        return {'n': 0, 'win_rate': None, 'avg_ret': None}
+    dates = [r['trade_date'] for r in rows]
+    closes = [r['close'] for r in rows]
+    n = wins = 0
+    rets = []
+    for i in range(1, len(rows)):
+        if dates[i] < window_start:
+            continue
+        chg = closes[i] / closes[i - 1] - 1
+        if chg <= -0.05 and i + CONTROL_DRIFT_HOLD < len(closes):
+            r = closes[i + CONTROL_DRIFT_HOLD] / closes[i] - 1
+            n += 1
+            wins += 1 if r > 0 else 0
+            rets.append(r)
+    return {'n': n, 'win_rate': round(wins / n * 100, 1) if n else None,
+            'avg_ret': round(sum(rets) / len(rets) * 100, 2) if rets else None}
+
+
+def run_control_drift_monthly(collect=True, log=print):
+    """池外对照月度漂移检查(S1研究建议例行化):
+    1) 对照组8股行情增量写 s1_control.db(生产库零写)
+    2) 两侧同式计算大跌信号口径(近CONTROL_DRIFT_WINDOW日窗)
+    3) 与上次快照对比输出漂移
+    4) 快照入生产库 control_drift(UNIQUE run_date, INSERT OR REPLACE 幂等)
+    异常漂移(S1建议原文): 对照组单笔均值由负转正且n>=5 → 复盘标记"""
+    # 1) 对照组增量行情(切换DB_PATH, try/finally恢复 — s1_build.py 同款手法)
+    if collect and os.path.exists(CONTROL_DB_PATH):
+        prod_path = DB_PATH
+        try:
+            globals()['DB_PATH'] = CONTROL_DB_PATH
+            for code, market, name in CONTROL_GROUP:
+                try:
+                    fn = {'A股': collect_a_share_daily, '港股': collect_hk_daily,
+                          '美股': collect_us_daily}[market]
+                    fn(code, days=120)
+                    log("  [drift] 对照行情 %s: OK" % code)
+                except Exception as e:
+                    log("  [drift] 对照行情 %s: %s %s" % (code, type(e).__name__, e))
+        finally:
+            globals()['DB_PATH'] = prod_path
+    window_start = (datetime.now() - timedelta(days=CONTROL_DRIFT_WINDOW)
+                    ).strftime('%Y-%m-%d')
+    # 2) 对照侧(读副本库)
+    ctrl = {}
+    if os.path.exists(CONTROL_DB_PATH):
+        cconn = sqlite3.connect(CONTROL_DB_PATH)
+        cconn.row_factory = sqlite3.Row
+        for code, market, name in CONTROL_GROUP:
+            rows = cconn.execute(
+                "SELECT trade_date, close FROM daily_quotes WHERE code=? AND close>0 "
+                "ORDER BY trade_date", (code,)).fetchall()
+            ctrl[code] = _crash_stats_from_quotes(rows, window_start)
+        cconn.close()
+    tot_n = sum(v['n'] for v in ctrl.values())
+    ctrl_all = {'n': tot_n,
+                'win_rate': (round(sum((v['win_rate'] or 0) * v['n']
+                                       for v in ctrl.values()) / tot_n, 1)
+                             if tot_n else None),
+                'avg_ret': (round(sum(v['avg_ret'] * v['n'] for v in ctrl.values()
+                                      if v['avg_ret'] is not None) / tot_n, 2)
+                            if tot_n else None)}
+    # 3) 池侧(生产库, 活跃池)
+    conn = get_db()
+    pool = {}
+    for r in conn.execute("SELECT code FROM stock_pool WHERE is_active=1"):
+        rows = conn.execute(
+            "SELECT trade_date, close FROM daily_quotes WHERE code=? AND close>0 "
+            "ORDER BY trade_date", (r['code'],)).fetchall()
+        pool[r['code']] = _crash_stats_from_quotes(rows, window_start)
+    conn.close()
+    p_n = sum(v['n'] for v in pool.values())
+    pool_all = {'n': p_n,
+                'win_rate': (round(sum((v['win_rate'] or 0) * v['n']
+                                       for v in pool.values()) / p_n, 1) if p_n else None),
+                'avg_ret': (round(sum(v['avg_ret'] * v['n'] for v in pool.values()
+                                      if v['avg_ret'] is not None) / p_n, 2)
+                            if p_n else None)}
+    # 4) 上次快照 + 漂移判定 + 入库
+    conn = get_db()
+    conn.execute("""CREATE TABLE IF NOT EXISTS control_drift(
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        run_date TEXT NOT NULL UNIQUE, window_start TEXT,
+        pool_json TEXT, control_json TEXT, per_stock_json TEXT,
+        drift_flag INTEGER DEFAULT 0, note TEXT, generated_at TEXT)""")
+    prev = conn.execute("SELECT * FROM control_drift ORDER BY run_date DESC "
+                        "LIMIT 1").fetchone()
+    prev_ctrl = json.loads(prev['control_json']) if prev else None
+    drift_flag = 0
+    drift_note = '正常(对照超额未翻转)'
+    if prev_ctrl and prev_ctrl.get('avg_ret') is not None and ctrl_all['n'] >= 5:
+        if prev_ctrl['avg_ret'] <= 0 < (ctrl_all['avg_ret'] or 0):
+            drift_flag = 1
+            drift_note = '⚠️ 对照组单笔均值由负转正(S1异常漂移定义)——触发复盘'
+    today = datetime.now().strftime('%Y-%m-%d')
+    conn.execute("INSERT OR REPLACE INTO control_drift(run_date, window_start, "
+                 "pool_json, control_json, per_stock_json, drift_flag, note, "
+                 "generated_at) VALUES(?,?,?,?,?,?,?,?)",
+                 (today, window_start,
+                  json.dumps(pool_all, ensure_ascii=False),
+                  json.dumps(ctrl_all, ensure_ascii=False),
+                  json.dumps({'pool': pool, 'control': ctrl}, ensure_ascii=False),
+                  drift_flag, drift_note,
+                  datetime.now().strftime('%Y-%m-%d %H:%M:%S')))
+    conn.commit()
+    conn.close()
+    return {'pool': pool_all, 'control': ctrl_all,
+            'prev_control': prev_ctrl, 'drift_flag': drift_flag,
+            'drift_note': drift_note, 'window': [window_start, today]}
+
+
+def get_control_drift_view():
+    """池外对照漂移读数(读路径无DDL): 历史快照 + 当前判定"""
+    conn = get_db()
+    out = {'snapshots': [], 'drift_flag': None, 'note': None}
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' "
+                    "AND name='control_drift'").fetchone():
+        for r in conn.execute("SELECT * FROM control_drift ORDER BY run_date DESC "
+                              "LIMIT 12"):
+            out['snapshots'].append({'run_date': r['run_date'],
+                                     'window_start': r['window_start'],
+                                     'pool': json.loads(r['pool_json']),
+                                     'control': json.loads(r['control_json']),
+                                     'drift_flag': r['drift_flag'],
+                                     'note': r['note']})
+        if out['snapshots']:
+            out['drift_flag'] = out['snapshots'][0]['drift_flag']
+            out['note'] = out['snapshots'][0]['note']
+    conn.close()
+    out['meta'] = {'control_group': [c[0] for c in CONTROL_GROUP],
+                   'hold': CONTROL_DRIFT_HOLD, 'window_days': CONTROL_DRIFT_WINDOW,
+                   'caliber': ('大跌(chg≤−5%)信号日收盘计价, 持有10交易日收盘对收盘; '
+                               '池/对照同式计算; 对照行情存 s1_control.db(生产库零污染)')}
+    return out
+
+
+def fetch_ah_premium_snapshot():
+    """恒生AH股溢价指数(HSAHP)快照——东财 100.HSAHP(Yahoo 无此指数, 2026-09-19 实测)。
+    O4纯观察因子: 不作为任何信号/门控/overlay输入, 仅展示跨市场资金压力情绪。
+    东财偶发断连, 重试3次(间隔1.5s)"""
+    import time as _t
+    hdr = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+           'Referer': 'https://quote.eastmoney.com/'}
+    last_err = None
+    for _attempt in range(3):
+        try:
+            r = _session.get("https://push2his.eastmoney.com/api/qt/stock/kline/get",
+                             params={"secid": "100.HSAHP", "fields1": "f1,f2,f3",
+                                     "fields2": "f51,f53", "klt": "101", "fqt": "0",
+                                     "lmt": "260", "end": "20500101"},
+                             headers=hdr, timeout=20)
+            kl = (r.json().get('data') or {}).get('klines') or []
+            closes = [float(k.split(',')[1]) for k in kl]
+            dates = [k.split(',')[0] for k in kl]
+            if len(closes) < 30:
+                return None
+            arr = np.array(closes)
+            return {'last': round(float(arr[-1]), 2),
+                    'prev': round(float(arr[-2]), 2) if len(arr) > 1 else None,
+                    'chg_pct': round(float(arr[-1] / arr[-2] - 1) * 100, 2) if len(arr) > 1 else None,
+                    'd20_avg': round(float(arr[-20:].mean()), 2),
+                    'd90_avg': round(float(arr[-90:].mean()), 2),
+                    'd90_low': round(float(arr[-90:].min()), 2),
+                    'd90_high': round(float(arr[-90:].max()), 2),
+                    'pct_vs_d90': round(float(arr[-1] / arr[-90:].mean() - 1) * 100, 2),
+                    'n': len(arr), 'asof': dates[-1]}
+        except Exception as e:
+            last_err = e
+            _t.sleep(1.5)
+    print("[ah-premium] 东财主源3次失败: %s → 降级 Yahoo 自算5对AH溢价均值" % last_err)
+    return _ah_premium_diy_yahoo()
+
+
+def _ah_premium_diy_yahoo():
+    """AH溢价降级源: Yahoo 自算 5 对经典A/H双重上市对溢价均值(×100)。
+    口径: premium_i = A价(CNY) / (H价(HKD) × HKDCNY); 与官方HSAHP(市值加权,含150+对)
+    存在口径差——返回值标注 source='diy', UI 明示非官方指数, 纯观察口径差可接受"""
+    import time as _t
+    pairs = [('601318.SS', '2318.HK'),    # 中国平安(H股4位无前导零, 坑33)
+             ('601398.SS', '1398.HK'),    # 工商银行
+             ('600036.SS', '3968.HK'),    # 招商银行
+             ('601288.SS', '1288.HK'),    # 农业银行
+             ('600030.SS', '6030.HK')]     # 中信证券
+
+    def _px(sym):
+        r = _session.get("https://query1.finance.yahoo.com/v8/finance/chart/%s" % sym,
+                         params={"range": "6mo", "interval": "1d"}, timeout=15)
+        rr = (r.json().get('chart', {}).get('result') or [None])[0]
+        if not rr:
+            raise RuntimeError(sym + ' 无数据')
+        ts = rr.get('timestamp') or []
+        q = (rr.get('indicators', {}).get('quote') or [{}])[0]
+        return q.get('close') or [], ts
+    try:
+        fx_arr, _ = _px('HKDCNY=X')
+        fx = None
+        for v in reversed(fx_arr):
+            if v:
+                fx = v
+                break
+        if not fx:
+            return None
+        prems, asof = [], None
+        for a_sym, h_sym in pairs:
+            a_arr, ts_a = _px(a_sym)
+            h_arr, _ = _px(h_sym)
+            a = next((v for v in reversed(a_arr) if v), None)
+            h = next((v for v in reversed(h_arr) if v), None)
+            if a and h:
+                prems.append(a / (h * fx) * 100)
+                asof = ts_a[-1]
+            _t.sleep(0.8)
+        if len(prems) < 3:
+            return None
+        arr = np.array(prems)
+        return {'last': round(float(arr.mean()), 2),
+                'prev': None, 'chg_pct': None,
+                'd20_avg': None, 'd90_avg': None,
+                'd90_low': None, 'd90_high': None,
+                'pct_vs_d90': None,
+                'n': len(prems), 'asof': (datetime.fromtimestamp(asof).strftime('%Y-%m-%d')
+                                          if asof else None),
+                'source': 'diy'}
+    except Exception as e:
+        print("[ah-premium-diy] %s: %s" % (type(e).__name__, e))
+        return None

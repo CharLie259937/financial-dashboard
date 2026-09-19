@@ -2316,6 +2316,38 @@ elif page == "量化分析":
         except Exception as e:
             st.error(f"危机窗相关性读取失败: {e}")
 
+        # ---- ⑨ AH股溢价·纯观察 (O4 · 跨市场报告批判性学习采纳项) ----
+        try:
+            @st.cache_data(ttl=3600, show_spinner=False)
+            def _ah_snap():
+                return quant_data.fetch_ah_premium_snapshot()
+            _ah = _ah_snap()
+            if _ah:
+                _src_note = ("东财 100.HSAHP 官方指数" if _ah.get('source') != 'diy'
+                             else "Yahoo 自算 5 对 A/H 溢价均值（东财被限流时的降级源，"
+                                  "与官方 HSAHP 口径有差，仅观察趋势）")
+                st.write(f"**AH股溢价 · 纯观察**（截至 {_ah['asof']}；{_src_note}；"
+                         "溢价↑=A股相对H股贵/跨境资金压力）")
+                if _ah.get('source') == 'diy':
+                    _a1, _a2 = st.columns(2)
+                    _a1.metric("5对均值溢价", f"{_ah['last']:.2f}")
+                    _a2.metric("覆盖对数", _ah['n'])
+                else:
+                    _a1, _a2, _a3, _a4 = st.columns(4)
+                    _a1.metric("最新溢价", f"{_ah['last']:.2f}",
+                               f"{_ah['chg_pct']:+.2f}% vs 昨收")
+                    _a2.metric("20日均值", f"{_ah['d20_avg']:.2f}")
+                    _a3.metric("90日均值", f"{_ah['d90_avg']:.2f}")
+                    _a4.metric("偏离90日均值", f"{_ah['pct_vs_d90']:+.2f}%",
+                               help=f"90日区间 {_ah['d90_low']} ~ {_ah['d90_high']}")
+                st.caption("O4 纯观察因子：模块9 overlay 家族配置已冻结，本因子不进入任何信号/"
+                           "门控/overlay——仅作跨市场资金压力情绪展示（A-H 价差不收敛为套利受限"
+                           "教科书案例，本体系无配对策略，故只观察不交易）")
+            else:
+                st.caption("AH溢价双源（东财官方/Yahoo自算）暂不可用")
+        except Exception as e:
+            st.error(f"AH溢价读取失败: {e}")
+
     # --- Tab 7: 策略回测 (模块5: D1引擎 + D2双段批量回测) ---
     # 渲染次序说明: 本块置于 Tab 6(含st.stop)之前, 与 Tab 8 同理; 且本块自身
     # 全程条件渲染, 任何分支都不使用 st.stop(), 保证8个标签页均能完整渲染
@@ -3806,6 +3838,47 @@ elif page == "量化分析":
                        "（选择泄漏）非证据；门控只做减法，样本积累慢于原版属预期")
         except Exception as e:
             st.error(f"门控变体裁决读数失败: {e}")
+
+        # ---------- ⑬ 池外对照月度漂移 (S1研究建议例行化) ----------
+        try:
+            _dv = quant_data.get_control_drift_view()
+            st.markdown("**⑬ 池外对照月度漂移**（S1 研究建议例行化：对照组 8 股 vs 池内，"
+                        "大跌信号口径并行对照；异常漂移=对照组单笔均值由负转正 → 触发复盘）")
+            if _dv['snapshots']:
+                _dv_df = pd.DataFrame([{
+                    "运行日": s['run_date'], "窗口起": s['window_start'],
+                    "池内笔数": s['pool']['n'],
+                    "池内胜率%": s['pool']['win_rate'],
+                    "池内单笔%": s['pool']['avg_ret'],
+                    "对照笔数": s['control']['n'],
+                    "对照胜率%": s['control']['win_rate'],
+                    "对照单笔%": s['control']['avg_ret'],
+                    "判定": "⚠️ 翻转复盘" if s['drift_flag'] else "正常",
+                } for s in _dv['snapshots']])
+                st.dataframe(_dv_df, use_container_width=True, hide_index=True)
+            else:
+                st.info("尚无快照——点击下方按钮运行首次池外对照漂移检查")
+            if _dv.get('drift_flag'):
+                st.warning(_dv['note'])
+            st.caption(_dv['meta']['caliber'] + "；建议每月运行一次（月度任务）")
+            if st.button("▶️ 运行池外对照漂移检查（增量采集对照8股行情 + 快照，约2分钟）",
+                         key="drift_run"):
+                with st.status("对照组行情增量采集中...", expanded=True) as _ds:
+                    def _dl(m):
+                        st.write(str(m))
+                    try:
+                        rep = quant_data.run_control_drift_monthly(collect=True, log=_dl)
+                        _ds.update(label=(f"✅ 漂移检查完成：池内 {rep['pool']['n']}笔"
+                                          f"{rep['pool']['avg_ret']}% vs 对照 "
+                                          f"{rep['control']['n']}笔"
+                                          f"{rep['control']['avg_ret']}% — {rep['drift_note']}"),
+                                   state="complete", expanded=False)
+                        st.rerun()
+                    except Exception as e:
+                        _ds.update(label="❌ 漂移检查异常", state="error", expanded=True)
+                        st.exception(e)
+        except Exception as e:
+            st.error(f"池外对照漂移读取失败: {e}")
 
 elif page == "数据库浏览":
     import tracker
