@@ -2890,6 +2890,36 @@ elif page == "量化分析":
             st.caption("结论层如实标注样本量: 大跌真实样本 n=10、跌破下轨 n=25(去重后), "
                        "S1a~S1d 统计后盾薄弱, 双栏结论以机制验证为主, 不作特征池准入依据")
 
+            # ---- ⑪ 风险分解视图 (D4 · 优化清单P1 · 2026-09-21; 观察层不改仓, 归位=裁决层配套观察) ----
+            try:
+                _rd = quant_data.get_risk_decomposition_view()
+                if _rd.get('error'):
+                    st.info(f"D4 风险分解: {_rd['error']}")
+                else:
+                    st.divider()
+                    st.write(f"**⑪ 风险分解视图**（D4 · 活跃池等权组合 · 样本内最近{_rd['window']}日三市场交集 "
+                             f"{_rd['sample'][0]} ~ {_rd['sample'][1]} 共{_rd['n_days']}日）")
+                    _top2 = sum(r['pcr_pct'] for r in _rd['rows'][:2])
+                    _dm1, _dm2, _dm3 = st.columns(3)
+                    _dm1.metric("组合年化波动 · 等权", f"{_rd['port_vol_eq_pct']:.1f}%")
+                    _dm2.metric("组合年化波动 · ATR倒数", f"{_rd['port_vol_atr_pct']:.1f}%",
+                                f"{(_rd['port_vol_atr_pct'] or 0) - _rd['port_vol_eq_pct']:+.1f}pp vs 等权")
+                    _dm3.metric("前二风险占比 (PCR)", f"{_top2:.1f}%")
+                    rd_df = pd.DataFrame([{
+                        '股票': r['code'], '名称': r['name'], '市场': r['market'],
+                        '年化波动%': r['ann_vol_pct'],
+                        '等权权重%': round(r['weight_eq'] * 100, 1),
+                        '风险贡献PCR%': r['pcr_pct'],
+                        'ATR14%': r['atr14_pct'],
+                        'ATR倒数权重%': round(r['w_atr'] * 100, 1) if r['w_atr'] else None,
+                        '权重差pp': r['w_diff_pp'],
+                    } for r in _rd['rows']])
+                    st.dataframe(rd_df, use_container_width=True, hide_index=True)
+                    st.caption(_rd['note'] + " · PCR<0 (如AAPL) = 与其余持仓平均协方差为负, 是分散器; "
+                               "等权 vs ATR倒数的波动差即「等权非风险最优」读数, 支撑 S2VW 预注册方向假设")
+            except Exception as e:
+                st.error(f"风险分解读取失败: {e}")
+
     # --- Tab 6: 信号效果 (模块3: 埋点信号历史胜率与收益统计) ---
     with quant_tab6:
         st.subheader("埋点信号效果统计")

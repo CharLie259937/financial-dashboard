@@ -240,6 +240,25 @@ check(f"S1e oos 超额 +0.64pp (5股池批次; 冻结协议: 回测不改观察�
 check("协议字段齐备", all(k in proto for k in
       ['knowledge_cutoff', 'freeze_date', 'honesty_note', 'freeze_rule']))
 
+# ---- [D4] 风险分解视图数据层 (2026-09-21, 观察层不改仓) ----
+rd = quant_data.get_risk_decomposition_view()
+check("D4 无错误返回", 'error' not in rd)
+if 'error' not in rd:
+    check(f"D4 PCR 合计=100% (实际 {sum(r['pcr_pct'] for r in rd['rows']):.2f}%)",
+          abs(sum(r['pcr_pct'] for r in rd['rows']) - 100.0) < 0.5)
+    check(f"D4 等权权重=1/N (实际 {rd['rows'][0]['weight_eq']:.4f}, N={len(rd['rows'])})",
+          abs(rd['rows'][0]['weight_eq'] - 1.0 / len(rd['rows'])) < 1e-9)
+    check(f"D4 ATR倒数权重合计=1 (实际 {sum(r['w_atr'] for r in rd['rows'] if r['w_atr']):.4f})",
+          abs(sum(r['w_atr'] for r in rd['rows'] if r['w_atr']) - 1.0) < 1e-6)
+    _conn2 = quant_data.get_db()
+    _qmax = _conn2.execute("SELECT MAX(trade_date) FROM daily_quotes").fetchone()[0]
+    _conn2.close()
+    check(f"D4 窗口无未来数据 (样本终点 {rd['sample'][1]} ≤ 行情最新日 {_qmax})",
+          rd['sample'][1] <= _qmax)
+    check(f"D4 样本量充足 (交集 {rd['n_days']} ≥ 36 日)", rd['n_days'] >= 36)
+    _neg = [r['code'] for r in rd['rows'] if r['pcr_pct'] < 0]
+    check(f"D4 允许负PCR(分散器)存在即标注 (实际 {_neg or '无'})", True)
+
 print()
 print("=" * 70)
 print(f"D3 数据层验证完成: {ok}/{ok + len(fail)} 项通过")

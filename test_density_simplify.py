@@ -94,6 +94,7 @@ checks3 = [
     ('T7 ② 净值曲线 保留', '② 净值曲线' in md3),
     ('T7 ④ 对比总表 保留', '④ 策略回测对比总表' in md3 or '④ 对比总表' in md3),
     ('T7 ⑩ 自动结论 保留', '⑩ 自动结论' in md3),
+    ('T7 ⑪ 风险分解视图 (D4) 渲染', '⑪ 风险分解视图' in md3),
     ('T9 ① 管道状态摘要(caption)', any('每日管道 · 最近运行' in (t or '') for t in cap3)),
     ('T9 ① 管道 expander', any('① 每日管道（手动运行 · 运行日志）' in (l or '') for l in exp3)),
     ('T9 ⑥ 前向交易明细 expander', any('⑥ 前向交易明细' in (l or '') for l in exp3)),
