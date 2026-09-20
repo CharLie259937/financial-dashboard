@@ -68,7 +68,42 @@ for name, ok in checks2:
         fails.append(name)
 
 # 档案 expander 应默认收起(AppTest 无法直读展开态, 以渲染顺序存在性代替)
+
+# ---------- 阶段3: 批次2 (T7 策略回测 + T9 前向跟踪, 全新会话) ----------
+at3 = AppTest.from_file(DASH, default_timeout=180)
+at3.run()
+at3.sidebar.radio[0].set_value("量化分析").run()
+n_err3 = len(at3.exception)
+print(f"[阶段3 批次2] 异常数: {n_err3}")
+for e in at3.exception:
+    print('--- exception ---'); print(e.value)
+if n_err3:
+    fails.append('阶段3存在异常')
+
+md3 = '\n'.join(m.value for m in at3.markdown)
+exp3 = [e.label for e in at3.expander]
+cap3 = [c.value for c in at3.caption]
+checks3 = [
+    ('T7 ⑤ 绩效指标明细 档案', any('⑤ 绩效指标明细（回测档案）' in (l or '') for l in exp3)),
+    ('T7 ⑥ 费率敏感性 档案', any('⑥ 费率敏感性（回测档案）' in (l or '') for l in exp3)),
+    ('T7 ⑦ 交易明细 档案', any('⑦ 交易明细（回测档案）' in (l or '') for l in exp3)),
+    ('T7 ⑧ 分段稳健性 档案', any('⑧ 分段稳健性（回测档案）' in (l or '') for l in exp3)),
+    ('T7 ⑨ 容量诊断 档案', any('⑨ 触发与容量诊断（回测档案）' in (l or '') for l in exp3)),
+    ('T7 ② 净值曲线 保留', '② 净值曲线' in md3),
+    ('T7 ④ 对比总表 保留', '④ 策略回测对比总表' in md3 or '④ 对比总表' in md3),
+    ('T7 ⑩ 自动结论 保留', '⑩ 自动结论' in md3),
+    ('T9 ① 管道状态摘要(caption)', any('每日管道 · 最近运行' in (t or '') for t in cap3)),
+    ('T9 ① 管道 expander', any('① 每日管道（手动运行 · 运行日志）' in (l or '') for l in exp3)),
+    ('T9 ⑥ 前向交易明细 expander', any('⑥ 前向交易明细' in (l or '') for l in exp3)),
+    ('T9 ② 新鲜度 保留', '② 数据新鲜度' in md3),
+    ('T9 ⑦ 衰减监控 保留', '⑦ 信号衰减监控' in md3),
+]
+for name, ok in checks3:
+    print(('  OK  ' if ok else '  MISS') + name)
+    if not ok:
+        fails.append(name)
+
 print()
 if fails:
     print('FAIL:', fails); sys.exit(1)
-print('批次1 AppTest 全部通过 PASS')
+print('批次1+2 AppTest 全部通过 PASS')

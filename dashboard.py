@@ -2653,141 +2653,146 @@ elif page == "量化分析":
                            "拒掉的触发含正贡献属预期; C3 对「下次财报未知」保守拒绝(排期缺位期间 "
                            "S1aE/S2E 成交为0属预注册行为)。唯一干净裁决 = 📡 前向跟踪页 ⑫ 门控变体裁决读数")
 
-            st.write(f"**⑤ 绩效指标明细 · {bt_seg} 段 × 费率 {bt_fee * 100:.1f}%**")
-            det_rows = []
-            for sid in bt_strats + ['B1', 'B2']:
-                r = _bt_run(sid, bt_seg, bt_fee)
-                if r is None:
-                    r = _bt_run(sid, bt_seg, 0.0)
-                if r is None:
-                    continue
-                det_rows.append({
-                    '对象': f"{r['strategy_id']} {r['strategy_name']}",
-                    '总收益%': _n(r['total_return']),
-                    '年化%': _n(r['annual_return']),
-                    '波动%': _n(r['annual_vol']),
-                    '夏普': _n(r['sharpe'], scale=1),
-                    '回撤%': _n(r['max_drawdown']),
-                    '回撤区间': f"{(r['mdd_start'] or '—')}~{(r['mdd_end'] or '—')}",
-                    '日胜率%': _n(r['daily_win_rate']),
-                    '笔数': r['n_trades'],
-                    '均笔收益%': _n(r['avg_trade_ret']),
-                    '均跳空成本pp': _n(r['avg_gap_cost']),
-                    '超额vsB1(pp)': _n(r['excess_vs_bh']),
-                    '超额vsB2(pp)': _n(r['excess_vs_index']),
-                })
-            det_df = pd.DataFrame(det_rows)
-            for c in ['总收益%', '年化%', '波动%', '夏普', '回撤%', '日胜率%', '笔数',
-                      '均笔收益%', '均跳空成本pp', '超额vsB1(pp)', '超额vsB2(pp)']:
-                det_df[c] = pd.to_numeric(det_df[c], errors='coerce')
-            st.dataframe(det_df, use_container_width=True, hide_index=True)
-            st.caption("回撤区间为该段内最大回撤起止日 · 均跳空成本=回测收益−模块3统计收益的均值"
-                       "(T+1开盘成交相对信号日收盘买入的执行损耗)")
+            with st.expander("📁 ⑤ 绩效指标明细（回测档案）"):
+                st.write(f"**⑤ 绩效指标明细 · {bt_seg} 段 × 费率 {bt_fee * 100:.1f}%**")
+                det_rows = []
+                for sid in bt_strats + ['B1', 'B2']:
+                    r = _bt_run(sid, bt_seg, bt_fee)
+                    if r is None:
+                        r = _bt_run(sid, bt_seg, 0.0)
+                    if r is None:
+                        continue
+                    det_rows.append({
+                        '对象': f"{r['strategy_id']} {r['strategy_name']}",
+                        '总收益%': _n(r['total_return']),
+                        '年化%': _n(r['annual_return']),
+                        '波动%': _n(r['annual_vol']),
+                        '夏普': _n(r['sharpe'], scale=1),
+                        '回撤%': _n(r['max_drawdown']),
+                        '回撤区间': f"{(r['mdd_start'] or '—')}~{(r['mdd_end'] or '—')}",
+                        '日胜率%': _n(r['daily_win_rate']),
+                        '笔数': r['n_trades'],
+                        '均笔收益%': _n(r['avg_trade_ret']),
+                        '均跳空成本pp': _n(r['avg_gap_cost']),
+                        '超额vsB1(pp)': _n(r['excess_vs_bh']),
+                        '超额vsB2(pp)': _n(r['excess_vs_index']),
+                    })
+                det_df = pd.DataFrame(det_rows)
+                for c in ['总收益%', '年化%', '波动%', '夏普', '回撤%', '日胜率%', '笔数',
+                          '均笔收益%', '均跳空成本pp', '超额vsB1(pp)', '超额vsB2(pp)']:
+                    det_df[c] = pd.to_numeric(det_df[c], errors='coerce')
+                st.dataframe(det_df, use_container_width=True, hide_index=True)
+                st.caption("回撤区间为该段内最大回撤起止日 · 均跳空成本=回测收益−模块3统计收益的均值"
+                           "(T+1开盘成交相对信号日收盘买入的执行损耗)")
 
-            st.write("**⑥ 费率敏感性 (总收益%, 单边 0 / 0.1% / 0.3%)**")
-            fig_fee = make_subplots(rows=1, cols=2, subplot_titles=("full 段", "oos 段"))
-            fee_colors = {0.0: '#43A047', 0.001: '#FB8C00', 0.003: '#E53935'}
-            for col, seg in enumerate(['full', 'oos'], start=1):
-                for fee in [0.0, 0.001, 0.003]:
-                    vals, labels = [], []
-                    for sid in bt_strats:
-                        r = _bt_run(sid, seg, fee)
-                        vals.append(_n(r and r['total_return']))
-                        labels.append(sid)
-                    fig_fee.add_trace(go.Bar(
-                        x=labels, y=vals, name=f"费率{fee * 100:.1f}%",
-                        marker_color=fee_colors[fee], showlegend=(col == 1)), row=1, col=col)
-                fig_fee.add_hline(y=0, line_dash='dot', line_color='#757575',
-                                  line_width=0.8, row=1, col=col)
-            fig_fee.update_layout(
-                barmode='group', template="plotly_white", height=360,
-                legend=dict(orientation="h", yanchor="bottom", y=1.05, x=0))
-            fig_fee.update_yaxes(title_text="总收益%", row=1, col=1)
-            st.plotly_chart(fig_fee, use_container_width=True)
-            st.caption("费率敏感性=策略对交易成本的稳健性: 高频策略(组合S2/KDJ金叉S1d)在0.3%费率下"
-                       "由正转负, 低频策略(大跌S1a/S1b)受费率影响最小")
+            with st.expander("📁 ⑥ 费率敏感性（回测档案）"):
+                st.write("**⑥ 费率敏感性 (总收益%, 单边 0 / 0.1% / 0.3%)**")
+                fig_fee = make_subplots(rows=1, cols=2, subplot_titles=("full 段", "oos 段"))
+                fee_colors = {0.0: '#43A047', 0.001: '#FB8C00', 0.003: '#E53935'}
+                for col, seg in enumerate(['full', 'oos'], start=1):
+                    for fee in [0.0, 0.001, 0.003]:
+                        vals, labels = [], []
+                        for sid in bt_strats:
+                            r = _bt_run(sid, seg, fee)
+                            vals.append(_n(r and r['total_return']))
+                            labels.append(sid)
+                        fig_fee.add_trace(go.Bar(
+                            x=labels, y=vals, name=f"费率{fee * 100:.1f}%",
+                            marker_color=fee_colors[fee], showlegend=(col == 1)), row=1, col=col)
+                    fig_fee.add_hline(y=0, line_dash='dot', line_color='#757575',
+                                      line_width=0.8, row=1, col=col)
+                fig_fee.update_layout(
+                    barmode='group', template="plotly_white", height=360,
+                    legend=dict(orientation="h", yanchor="bottom", y=1.05, x=0))
+                fig_fee.update_yaxes(title_text="总收益%", row=1, col=1)
+                st.plotly_chart(fig_fee, use_container_width=True)
+                st.caption("费率敏感性=策略对交易成本的稳健性: 高频策略(组合S2/KDJ金叉S1d)在0.3%费率下"
+                           "由正转负, 低频策略(大跌S1a/S1b)受费率影响最小")
 
-            # ---- ⑦ 交易明细表 ----
-            st.write(f"**⑦ 交易明细 · {bt_seg} 段 × 费率 {bt_fee * 100:.1f}%**")
-            tv1, tv2 = st.columns([1.5, 3])
-            with tv1:
-                tr_sid = st.selectbox("选择策略", bt_strats, index=0, key="qp_bt_tr_sid")
-            trs = [t for t in tr_rows if t['strategy_id'] == tr_sid
-                   and t['segment'] == bt_seg and abs(t['fee'] - bt_fee) < 1e-9]
-            if trs:
-                tr_df = pd.DataFrame([{
-                    '代码': t['code'], '市场': t['market'],
-                    '触发日': t['trigger_date'], '买入日': t['entry_date'],
-                    '买入价': t['entry_price'], '卖出日': t['exit_date'],
-                    '卖出价': t['exit_price'], '收益%': _n(t['return_pct']),
-                    '统计口径%': _n(t['stat_ret']), '跳空成本pp': _n(t['gap_cost']),
-                    '持有天数': t['holding_days'],
-                } for t in trs])
-                for c in ['买入价', '卖出价', '收益%', '统计口径%', '跳空成本pp', '持有天数']:
-                    tr_df[c] = pd.to_numeric(tr_df[c], errors='coerce')
-                with tv2:
-                    st.write("")
-                    st.metric("交易笔数", len(trs), f"均收益 {tr_df['收益%'].mean():.2f}%")
-                st.dataframe(tr_df, use_container_width=True, hide_index=True, height=280)
-                st.caption("统计口径% = 信号日收盘买入→退出日收盘卖出(模块3口径); 跳空成本 = 收益% − 统计口径%"
-                           "（负值=开盘成交劣于收盘成交的隔夜跳空损耗）")
-            else:
-                with tv2:
-                    st.write("")
-                st.info(f"{tr_sid} 在 {bt_seg} 段 × 费率{bt_fee * 100:.1f}% 下无成交交易")
+            with st.expander("📁 ⑦ 交易明细（回测档案）"):
+                # ---- ⑦ 交易明细表 ----
+                st.write(f"**⑦ 交易明细 · {bt_seg} 段 × 费率 {bt_fee * 100:.1f}%**")
+                tv1, tv2 = st.columns([1.5, 3])
+                with tv1:
+                    tr_sid = st.selectbox("选择策略", bt_strats, index=0, key="qp_bt_tr_sid")
+                trs = [t for t in tr_rows if t['strategy_id'] == tr_sid
+                       and t['segment'] == bt_seg and abs(t['fee'] - bt_fee) < 1e-9]
+                if trs:
+                    tr_df = pd.DataFrame([{
+                        '代码': t['code'], '市场': t['market'],
+                        '触发日': t['trigger_date'], '买入日': t['entry_date'],
+                        '买入价': t['entry_price'], '卖出日': t['exit_date'],
+                        '卖出价': t['exit_price'], '收益%': _n(t['return_pct']),
+                        '统计口径%': _n(t['stat_ret']), '跳空成本pp': _n(t['gap_cost']),
+                        '持有天数': t['holding_days'],
+                    } for t in trs])
+                    for c in ['买入价', '卖出价', '收益%', '统计口径%', '跳空成本pp', '持有天数']:
+                        tr_df[c] = pd.to_numeric(tr_df[c], errors='coerce')
+                    with tv2:
+                        st.write("")
+                        st.metric("交易笔数", len(trs), f"均收益 {tr_df['收益%'].mean():.2f}%")
+                    st.dataframe(tr_df, use_container_width=True, hide_index=True, height=280)
+                    st.caption("统计口径% = 信号日收盘买入→退出日收盘卖出(模块3口径); 跳空成本 = 收益% − 统计口径%"
+                               "（负值=开盘成交劣于收盘成交的隔夜跳空损耗）")
+                else:
+                    with tv2:
+                        st.write("")
+                    st.info(f"{tr_sid} 在 {bt_seg} 段 × 费率{bt_fee * 100:.1f}% 下无成交交易")
 
-            # ---- ⑧ 分段稳健性 ----
-            st.write(f"**⑧ 分段稳健性 · {bt_seg} 段 (前半/后半年化收益%)**")
-            sr_rows = []
-            for sid in bt_strats + ['B1', 'B2']:
-                r = _bt_run(sid, bt_seg)
-                if r is None:
-                    continue
-                sr_rows.append({
-                    '对象': f"{sid} {r['strategy_name']}",
-                    '前半段年化%': _n(r['seg1_annual']),
-                    '后半段年化%': _n(r['seg2_annual']),
-                    '一致性': ('一致' if (r['seg1_annual'] is not None
-                                     and r['seg2_annual'] is not None
-                                     and (r['seg1_annual'] > 0) == (r['seg2_annual'] > 0))
-                              else '不一致'),
-                })
-            if sr_rows:
-                sr_df = pd.DataFrame(sr_rows)
-                for c in ['前半段年化%', '后半段年化%']:
-                    sr_df[c] = pd.to_numeric(sr_df[c], errors='coerce')
-                st.dataframe(sr_df, use_container_width=True, hide_index=True)
-            st.caption("前/后半段 = 日历中点切分的行情regime稳健性口径; 与 full/oos(知识截止日切分,"
-                       "管选择偏差控制)是两种并存口径, 用途分开(见下方协议说明)")
+            with st.expander("📁 ⑧ 分段稳健性（回测档案）"):
+                # ---- ⑧ 分段稳健性 ----
+                st.write(f"**⑧ 分段稳健性 · {bt_seg} 段 (前半/后半年化收益%)**")
+                sr_rows = []
+                for sid in bt_strats + ['B1', 'B2']:
+                    r = _bt_run(sid, bt_seg)
+                    if r is None:
+                        continue
+                    sr_rows.append({
+                        '对象': f"{sid} {r['strategy_name']}",
+                        '前半段年化%': _n(r['seg1_annual']),
+                        '后半段年化%': _n(r['seg2_annual']),
+                        '一致性': ('一致' if (r['seg1_annual'] is not None
+                                         and r['seg2_annual'] is not None
+                                         and (r['seg1_annual'] > 0) == (r['seg2_annual'] > 0))
+                                  else '不一致'),
+                    })
+                if sr_rows:
+                    sr_df = pd.DataFrame(sr_rows)
+                    for c in ['前半段年化%', '后半段年化%']:
+                        sr_df[c] = pd.to_numeric(sr_df[c], errors='coerce')
+                    st.dataframe(sr_df, use_container_width=True, hide_index=True)
+                st.caption("前/后半段 = 日历中点切分的行情regime稳健性口径; 与 full/oos(知识截止日切分,"
+                           "管选择偏差控制)是两种并存口径, 用途分开(见下方协议说明)")
 
-            # ---- ⑨ 诊断信息 ----
-            st.write(f"**⑨ 触发与容量诊断 · {bt_seg} 段**")
-            dg_rows = []
-            months = max(1.0, (seg_row_b1['n_days'] or 1) / 21.0) if seg_row_b1 else 1.0
-            for sid in bt_strats:
-                r = _bt_run(sid, bt_seg)
-                if r is None:
-                    continue
-                dg_rows.append({
-                    '策略': f"{sid} {r['strategy_name']}",
-                    '触发数': r['n_triggers'],
-                    '成交笔数': r['n_trades'],
-                    '满仓拒绝': r['n_rejected'],
-                    '末端放弃': r['n_end_dropped'],
-                    '宏观封锁': r['n_macro_blocked'],
-                    '触发密度(次/月)': round(r['n_triggers'] / months, 2),
-                    '资金占用率%': _n(r['avg_fund_util']),
-                    '均跳空成本pp': _n(r['avg_gap_cost']),
-                })
-            if dg_rows:
-                dg_df = pd.DataFrame(dg_rows)
-                for c in ['触发数', '成交笔数', '满仓拒绝', '末端放弃', '宏观封锁',
-                          '触发密度(次/月)', '资金占用率%', '均跳空成本pp']:
-                    dg_df[c] = pd.to_numeric(dg_df[c], errors='coerce')
-                st.dataframe(dg_df, use_container_width=True, hide_index=True)
-                st.caption("满仓拒绝 = K=3槽位全占用时被放弃的信号(容量约束); 末端放弃 = 数据末端"
-                       "无法完成完整持有期的信号; 宏观封锁 = overlay 变体在封锁日放弃的开仓数"
-                       "(仅 S*M 列有值); 资金占用率 = 持仓槽市值占比均值")
+            with st.expander("📁 ⑨ 触发与容量诊断（回测档案）"):
+                # ---- ⑨ 诊断信息 ----
+                st.write(f"**⑨ 触发与容量诊断 · {bt_seg} 段**")
+                dg_rows = []
+                months = max(1.0, (seg_row_b1['n_days'] or 1) / 21.0) if seg_row_b1 else 1.0
+                for sid in bt_strats:
+                    r = _bt_run(sid, bt_seg)
+                    if r is None:
+                        continue
+                    dg_rows.append({
+                        '策略': f"{sid} {r['strategy_name']}",
+                        '触发数': r['n_triggers'],
+                        '成交笔数': r['n_trades'],
+                        '满仓拒绝': r['n_rejected'],
+                        '末端放弃': r['n_end_dropped'],
+                        '宏观封锁': r['n_macro_blocked'],
+                        '触发密度(次/月)': round(r['n_triggers'] / months, 2),
+                        '资金占用率%': _n(r['avg_fund_util']),
+                        '均跳空成本pp': _n(r['avg_gap_cost']),
+                    })
+                if dg_rows:
+                    dg_df = pd.DataFrame(dg_rows)
+                    for c in ['触发数', '成交笔数', '满仓拒绝', '末端放弃', '宏观封锁',
+                              '触发密度(次/月)', '资金占用率%', '均跳空成本pp']:
+                        dg_df[c] = pd.to_numeric(dg_df[c], errors='coerce')
+                    st.dataframe(dg_df, use_container_width=True, hide_index=True)
+                    st.caption("满仓拒绝 = K=3槽位全占用时被放弃的信号(容量约束); 末端放弃 = 数据末端"
+                           "无法完成完整持有期的信号; 宏观封锁 = overlay 变体在封锁日放弃的开仓数"
+                           "(仅 S*M 列有值); 资金占用率 = 持仓槽市值占比均值")
 
             # ---- ⑩ 协议与诚实性声明 + 自动结论 ----
             st.divider()
@@ -3443,49 +3448,58 @@ elif page == "量化分析":
             "追加式入库 · 裁决规则预注册 · 净值从 1 重起，与回测 oos 段严格分离")
 
         # ---------- ① 每日管道 ----------
-        st.markdown("**① 每日管道**（收盘后运行一次 · 9 步：孤儿股补课 → 行情 → 指数 → 指标 → "
-                    "信号扫描 → 宽表 → 宏观日历重采(近3天) → 封锁日台账追加(守卫=完整性截断日) → "
-                    "前向记录 → 新鲜度）")
-        pc1, pc2 = st.columns([1, 2])
-        with pc1:
-            if st.button("▶️ 运行每日管道", type="primary", key="m7_pipe_run"):
-                with st.status("每日管道运行中...", expanded=True) as m7_status:
-                    def _m7_log(msg):
-                        st.write(str(msg))
-                    try:
-                        rep = quant_data.run_daily_pipeline(log=_m7_log)
-                        n_err = sum(1 for v in rep['steps'].values()
-                                    if isinstance(v, dict) and 'error' in v)
-                        if n_err:
-                            m7_status.update(label=f"⚠️ 管道完成（{n_err} 个步骤失败，详见日志）",
-                                             state="error", expanded=True)
-                            for k, v in rep['steps'].items():
-                                if isinstance(v, dict) and 'error' in v:
-                                    st.error(f"步骤 {k}: {v['error']}")
-                        else:
-                            fr_al = rep.get('freshness', {}).get('alerts', [])
-                            lag_txt = ("，无新鲜度告警" if not fr_al else
-                                       "，告警: " + ", ".join(
-                                           f"{s['code']} 落后{s['lag_trading_days']}日" for s in fr_al))
-                            m7_status.update(label=f"✅ 每日管道完成{lag_txt}",
-                                             state="complete", expanded=False)
-                            st.rerun()
-                    except Exception as e:
-                        m7_status.update(label="❌ 管道异常终止", state="error", expanded=True)
-                        st.exception(e)
-        with pc2:
-            _last = quant_data.get_pipeline_last_run()
-            if _last:
-                _steps_ok = [k for k, v in _last.get('steps', {}).items() if v == 'OK']
-                _steps_err = [k for k, v in _last.get('steps', {}).items() if v != 'OK']
-                st.markdown(
-                    f"最近运行：**{_last.get('generated_at', '—')}** · "
-                    f"成功 {len(_steps_ok)}/{len(_last.get('steps', {}))} 步")
-                if _steps_err:
-                    st.markdown("失败步骤：" + "、".join(
-                        f"`{k}`({v})" for k, v in _last.get('steps', {}).items() if v != 'OK'))
-            else:
-                st.info("尚未运行过每日管道（点击左侧按钮或运行 daily_pipeline.py）")
+        _pl_last = quant_data.get_pipeline_last_run()
+        if _pl_last:
+            _pl_ok = sum(1 for v in _pl_last.get("steps", {}).values() if v == "OK")
+            _pl_n = len(_pl_last.get("steps", {}))
+            st.caption(f"① 每日管道 · 最近运行 {_pl_last.get('generated_at', '—')} · "
+                       f"成功 {_pl_ok}/{_pl_n} 步 · 展开可手动运行/查看失败步骤")
+        else:
+            st.caption("① 每日管道 · 尚未运行过 · 展开可手动运行")
+        with st.expander("📁 ① 每日管道（手动运行 · 运行日志）"):
+            st.markdown("**① 每日管道**（收盘后运行一次 · 9 步：孤儿股补课 → 行情 → 指数 → 指标 → "
+                        "信号扫描 → 宽表 → 宏观日历重采(近3天) → 封锁日台账追加(守卫=完整性截断日) → "
+                        "前向记录 → 新鲜度）")
+            pc1, pc2 = st.columns([1, 2])
+            with pc1:
+                if st.button("▶️ 运行每日管道", type="primary", key="m7_pipe_run"):
+                    with st.status("每日管道运行中...", expanded=True) as m7_status:
+                        def _m7_log(msg):
+                            st.write(str(msg))
+                        try:
+                            rep = quant_data.run_daily_pipeline(log=_m7_log)
+                            n_err = sum(1 for v in rep['steps'].values()
+                                        if isinstance(v, dict) and 'error' in v)
+                            if n_err:
+                                m7_status.update(label=f"⚠️ 管道完成（{n_err} 个步骤失败，详见日志）",
+                                                 state="error", expanded=True)
+                                for k, v in rep['steps'].items():
+                                    if isinstance(v, dict) and 'error' in v:
+                                        st.error(f"步骤 {k}: {v['error']}")
+                            else:
+                                fr_al = rep.get('freshness', {}).get('alerts', [])
+                                lag_txt = ("，无新鲜度告警" if not fr_al else
+                                           "，告警: " + ", ".join(
+                                               f"{s['code']} 落后{s['lag_trading_days']}日" for s in fr_al))
+                                m7_status.update(label=f"✅ 每日管道完成{lag_txt}",
+                                                 state="complete", expanded=False)
+                                st.rerun()
+                        except Exception as e:
+                            m7_status.update(label="❌ 管道异常终止", state="error", expanded=True)
+                            st.exception(e)
+            with pc2:
+                _last = quant_data.get_pipeline_last_run()
+                if _last:
+                    _steps_ok = [k for k, v in _last.get('steps', {}).items() if v == 'OK']
+                    _steps_err = [k for k, v in _last.get('steps', {}).items() if v != 'OK']
+                    st.markdown(
+                        f"最近运行：**{_last.get('generated_at', '—')}** · "
+                        f"成功 {len(_steps_ok)}/{len(_last.get('steps', {}))} 步")
+                    if _steps_err:
+                        st.markdown("失败步骤：" + "、".join(
+                            f"`{k}`({v})" for k, v in _last.get('steps', {}).items() if v != 'OK'))
+                else:
+                    st.info("尚未运行过每日管道（点击左侧按钮或运行 daily_pipeline.py）")
 
         # 新鲜度表
         st.markdown("**② 数据新鲜度**（落后交易日数 > 阈值即红色告警；指数/宏观滞后仅展示）")
@@ -3704,18 +3718,19 @@ elif page == "量化分析":
         else:
             st.info("暂无前向状态快照")
 
-        # ⑥ 交易明细
-        st.markdown("**⑥ 前向交易明细**（最近 300 笔，追加式；尚未到持有期末的交易不入库）")
-        if _view['trades']:
-            _tdf = pd.DataFrame(_view['trades'])
-            _tdf = _tdf.rename(columns={
-                'strategy_id': '策略', 'code': '代码', 'market': '市场',
-                'trigger_date': '触发日', 'entry_date': '买入日', 'entry_price': '买入价',
-                'exit_date': '卖出日', 'exit_price': '卖出价', 'return_pct': '收益%',
-                'holding_days': '持有天数'})
-            st.dataframe(_tdf, use_container_width=True, hide_index=True)
-        else:
-            st.info("前向窗口暂无已完成交易")
+        with st.expander("📁 ⑥ 前向交易明细（最近 300 笔 · 追加式）"):
+            # ⑥ 交易明细
+            st.markdown("**⑥ 前向交易明细**（最近 300 笔，追加式；尚未到持有期末的交易不入库）")
+            if _view['trades']:
+                _tdf = pd.DataFrame(_view['trades'])
+                _tdf = _tdf.rename(columns={
+                    'strategy_id': '策略', 'code': '代码', 'market': '市场',
+                    'trigger_date': '触发日', 'entry_date': '买入日', 'entry_price': '买入价',
+                    'exit_date': '卖出日', 'exit_price': '卖出价', 'return_pct': '收益%',
+                    'holding_days': '持有天数'})
+                st.dataframe(_tdf, use_container_width=True, hide_index=True)
+            else:
+                st.info("前向窗口暂无已完成交易")
 
         # ---------- ⑦ 信号衰减监控 (S2 · 优化清单 2026-09-14) ----------
         st.markdown("**⑦ 信号衰减监控**（S2 · 滚动 120 日窗口：信号家族胜率 − 全日随机基准；"

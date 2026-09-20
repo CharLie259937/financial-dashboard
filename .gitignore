@@ -35,6 +35,7 @@
 !test_s2_streamline.py
 !test_density_simplify.py
 !_patch_simplify_b1.py
+!_patch_simplify_b2.py
 
 # --- docs ---
 !模块5开发计划.md
