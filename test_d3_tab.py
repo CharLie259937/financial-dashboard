@@ -9,7 +9,8 @@ S1b持有5日出场更快、新端点下复利占优), S1a超额42.22pp, S1e+9.3
 (美股09-15行情终局到达+B1端点移动+当日批次重生: S2超额68.21pp回到居首,
 S1a超额43.27pp, S1e+10.41pp; 居首随端点在S1b/S2间翻转属已知模式) → 09-16 二次重钉
 (17:41补跑管道吸收当日到货港股/指数端点后当日批次再生: 仅S1a 43.27→43.75pp漂移,
-S2居首/S1e不变) → 09-18 门控批次重钉(12策略+S1aE/S2E/S1bV/S2V四门控变体: S1aM超额58.67pp微弱居首, S1a 43.23pp, S1e+5.99pp; 费率脆弱=S1aE/S1d/S2E) → 09-19 槽位批次重钉(13策略+S2K6; 09-18美股端点到达: S2M 50.49pp反超居首, S1a 30.90pp, S1e+3.48pp; 费率脆弱不变) —
+S2居首/S1e不变) → 09-18 门控批次重钉(12策略+S1aE/S2E/S1bV/S2V四门控变体: S1aM超额58.67pp微弱居首, S1a 43.23pp, S1e+5.99pp; 费率脆弱=S1aE/S1d/S2E) → 09-19 槽位批次重钉(13策略+S2K6; 09-18美股端点到达: S2M 50.49pp反超居首, S1a 30.90pp, S1e+3.48pp; 费率脆弱不变) → 09-20 看板简化批次日重钉
+(09-19/20行情端点到达B1上移挤压低频策略超额: S1a 28.06pp, S1e+0.64pp; S2M仍居首, 费率脆弱不变) —
 单点读数随端点漂移属已知模式, 唯一稳定裁决仍是前向测试
 注意: test_module5 每次运行会重生成当日批次(run_d2_backtests 同日覆盖), 行情刷新后
 B1(恒满仓)端点移动而空仓策略不动 → 超额期望值以"数据刷新后重生成"的批次为准"""
@@ -171,8 +172,8 @@ check("数值列 dtype 均为数值型 int64/float64 (无 object 混型, Arrow �
           for c in cmp_df.columns if c != '对象'))
 s1a = cmp_df[cmp_df['对象'].str.startswith('S1a ')].iloc[0]
 check(f"S1a OOS收益 30.44 (实际 {s1a['OOS收益%']})", abs(s1a['OOS收益%'] - 30.44) < 0.01)
-check(f"S1a OOS超额vsB1 30.90pp (实际 {s1a['OOS超额vsB1(pp)']})",
-      abs(s1a['OOS超额vsB1(pp)'] - 30.90) < 0.01)
+check(f"S1a OOS超额vsB1 28.06pp (实际 {s1a['OOS超额vsB1(pp)']})",
+      abs(s1a['OOS超额vsB1(pp)'] - 28.06) < 0.01)
 
 print("[6] 费率敏感性图构建")
 fig_fee = make_subplots(rows=1, cols=2, subplot_titles=("full 段", "oos 段"))
@@ -233,8 +234,8 @@ s2_oos = _bt_run('S2', 'oos')
 check(f"S2 oos 满仓拒率>30% 触发容量约束结论 (实际 {s2_oos['n_rejected']}/{s2_oos['n_triggers']})",
       s2_oos['n_rejected'] / s2_oos['n_triggers'] > 0.3)
 s1e_oos = _bt_run('S1e', 'oos')
-check(f"S1e oos 超额 +3.48pp (5股池批次; 冻结协议: 回测不改观察状态, 裁决=前向)",
-      abs(s1e_oos['excess_vs_bh'] - 0.0348) < 0.005
+check(f"S1e oos 超额 +0.64pp (5股池批次; 冻结协议: 回测不改观察状态, 裁决=前向)",
+      abs(s1e_oos['excess_vs_bh'] - 0.0064) < 0.005
       and quant_data.BT_STRATEGIES['S1e'].get('observation') is True)
 check("协议字段齐备", all(k in proto for k in
       ['knowledge_cutoff', 'freeze_date', 'honesty_note', 'freeze_rule']))
