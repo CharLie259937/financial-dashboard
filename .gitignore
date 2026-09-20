@@ -36,6 +36,7 @@
 !test_density_simplify.py
 !_patch_simplify_b1.py
 !_patch_simplify_b2.py
+!_patch_simplify_b3.py
 
 # --- docs ---
 !模块5开发计划.md

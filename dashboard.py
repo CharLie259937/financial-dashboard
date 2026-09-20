@@ -358,6 +358,14 @@ def fetch_indices() -> list:
 
 page = st.sidebar.radio("导航", ["实时查询", "长期追踪", "量化分析", "数据库浏览"])
 
+# 展示密度(看板简化批次3 2026-09-19): 档案层 expander 统一联动; 默认精简=收起
+ARCHIVE_EXPANDED = False
+if page == "量化分析":
+    _dens = st.sidebar.radio(
+        "展示密度", ["精简", "完整"], horizontal=True, index=0,
+        help="精简=研究档案区块默认收起(裁决/操作层直接可见); 完整=全部展开供研究回查")
+    ARCHIVE_EXPANDED = (_dens == "完整")
+
 if page == "实时查询":
     st.title("金融数据可视化面板")
 elif page == "长期追踪":
@@ -1099,22 +1107,23 @@ elif page == "量化分析":
 
         st.divider()
 
-        # 宽表预览
-        st.write("**宽表预览**")
-        wt_code = st.text_input("输入股票代码查看宽表", placeholder="如 600000", key="qp_wt_code")
-        if wt_code.strip():
-            wt_df = quant_data.get_feature_base(wt_code.strip())
-            if not wt_df.empty:
-                st.dataframe(wt_df, use_container_width=True, hide_index=True)
-                st.write(f"共 {len(wt_df)} 行, {len(wt_df.columns)} 列")
-                sig_cols = [c for c in wt_df.columns if c.startswith('sig_')]
-                evt_cols = [c for c in wt_df.columns if c.startswith('evt_')]
-                sig_sum = wt_df[sig_cols].sum()
-                st.write("**各信号触发次数:**")
-                st.dataframe(sig_sum[sig_sum > 0].reset_index().rename(columns={'index': '信号类型', 0: '次数'}),
-                             use_container_width=True, hide_index=True)
-            else:
-                st.warning(f"未找到 {wt_code.strip()} 的宽表数据，请先生成宽表。")
+        with st.expander("📁 宽表预览与信号触发明细（诊断档案）", expanded=ARCHIVE_EXPANDED):
+            # 宽表预览
+            st.write("**宽表预览**")
+            wt_code = st.text_input("输入股票代码查看宽表", placeholder="如 600000", key="qp_wt_code")
+            if wt_code.strip():
+                wt_df = quant_data.get_feature_base(wt_code.strip())
+                if not wt_df.empty:
+                    st.dataframe(wt_df, use_container_width=True, hide_index=True)
+                    st.write(f"共 {len(wt_df)} 行, {len(wt_df.columns)} 列")
+                    sig_cols = [c for c in wt_df.columns if c.startswith('sig_')]
+                    evt_cols = [c for c in wt_df.columns if c.startswith('evt_')]
+                    sig_sum = wt_df[sig_cols].sum()
+                    st.write("**各信号触发次数:**")
+                    st.dataframe(sig_sum[sig_sum > 0].reset_index().rename(columns={'index': '信号类型', 0: '次数'}),
+                                 use_container_width=True, hide_index=True)
+                else:
+                    st.warning(f"未找到 {wt_code.strip()} 的宽表数据，请先生成宽表。")
 
         st.divider()
 
@@ -1583,211 +1592,213 @@ elif page == "量化分析":
         st.write(f"**数据时间范围:** {coverage['date_range']}")
         st.write(f"**活跃股票池:** {coverage['pool_count']} 只")
 
-        # 按市场分布
-        if coverage.get('by_market'):
-            st.subheader("按市场分布")
-            mk_data = [{"市场": m["market"], "股票数": m["codes"], "日线数": m["rows"]}
-                       for m in coverage['by_market']]
-            st.dataframe(pd.DataFrame(mk_data), use_container_width=True, hide_index=True)
+        with st.expander("📁 数据分布 · 覆盖 · 日线图（诊断档案）", expanded=ARCHIVE_EXPANDED):
+            # 按市场分布
+            if coverage.get('by_market'):
+                st.subheader("按市场分布")
+                mk_data = [{"市场": m["market"], "股票数": m["codes"], "日线数": m["rows"]}
+                           for m in coverage['by_market']]
+                st.dataframe(pd.DataFrame(mk_data), use_container_width=True, hide_index=True)
 
-        # 信号统计
-        stats = quant_data.get_signal_stats()
-        if stats['total'] > 0:
-            st.subheader("信号统计")
-            sc1, sc2 = st.columns(2)
-            with sc1:
-                dir_data = [{"方向": "看多" if d["direction"]=="bullish" else "看空" if d["direction"]=="bearish" else "中性",
-                             "数量": d["c"]} for d in stats['by_direction']]
-                st.dataframe(pd.DataFrame(dir_data), use_container_width=True, hide_index=True)
-            with sc2:
-                type_data = [{"类型": t["signal_type"], "子类型": t.get("signal_subtype",""),
-                             "数量": t["c"]} for t in stats['by_type']]
-                st.dataframe(pd.DataFrame(type_data), use_container_width=True, hide_index=True)
+            # 信号统计
+            stats = quant_data.get_signal_stats()
+            if stats['total'] > 0:
+                st.subheader("信号统计")
+                sc1, sc2 = st.columns(2)
+                with sc1:
+                    dir_data = [{"方向": "看多" if d["direction"]=="bullish" else "看空" if d["direction"]=="bearish" else "中性",
+                                 "数量": d["c"]} for d in stats['by_direction']]
+                    st.dataframe(pd.DataFrame(dir_data), use_container_width=True, hide_index=True)
+                with sc2:
+                    type_data = [{"类型": t["signal_type"], "子类型": t.get("signal_subtype",""),
+                                 "数量": t["c"]} for t in stats['by_type']]
+                    st.dataframe(pd.DataFrame(type_data), use_container_width=True, hide_index=True)
 
-        # 有数据的股票列表
-        stocks_with_data = quant_data.get_stock_list_with_data()
-        if stocks_with_data:
-            st.subheader("已有日线数据的股票")
-            sd_df = pd.DataFrame([{
-                "代码": s["code"],
-                "市场": s["market"],
-                "天数": s["days"],
-                "起始日": s["start"],
-                "截止日": s["end"],
-            } for s in stocks_with_data])
-            st.dataframe(sd_df, use_container_width=True, hide_index=True)
+            # 有数据的股票列表
+            stocks_with_data = quant_data.get_stock_list_with_data()
+            if stocks_with_data:
+                st.subheader("已有日线数据的股票")
+                sd_df = pd.DataFrame([{
+                    "代码": s["code"],
+                    "市场": s["market"],
+                    "天数": s["days"],
+                    "起始日": s["start"],
+                    "截止日": s["end"],
+                } for s in stocks_with_data])
+                st.dataframe(sd_df, use_container_width=True, hide_index=True)
 
-            # 选择股票查看日线图
-            st.divider()
-            st.subheader("日线行情图")
-            sel_stock = st.selectbox("选择股票", [s["code"] for s in stocks_with_data], key="qd_chart_sel")
-            if sel_stock:
-                df_q = quant_data.get_daily_quotes(sel_stock, days=250)
-                if not df_q.empty:
-                    df_q = quant_data.calc_all_indicators(df_q)
-                    fig_q = make_subplots(rows=2, cols=1, shared_xaxes=True,
-                                         row_heights=[0.7, 0.3], vertical_spacing=0.05)
-                    fig_q.add_trace(go.Candlestick(
-                        x=df_q['date'], open=df_q['open'], high=df_q['high'],
-                        low=df_q['low'], close=df_q['close'],
-                        increasing_line_color='#1DC981', decreasing_line_color='#E8463A',
-                        name='K线'
-                    ), row=1, col=1)
-                    if 'MA20' in df_q.columns:
-                        fig_q.add_trace(go.Scatter(
-                            x=df_q['date'], y=df_q['MA20'],
-                            mode='lines', name='MA20',
-                            line=dict(color='#4B3FE3', width=1)
+                # 选择股票查看日线图
+                st.divider()
+                st.subheader("日线行情图")
+                sel_stock = st.selectbox("选择股票", [s["code"] for s in stocks_with_data], key="qd_chart_sel")
+                if sel_stock:
+                    df_q = quant_data.get_daily_quotes(sel_stock, days=250)
+                    if not df_q.empty:
+                        df_q = quant_data.calc_all_indicators(df_q)
+                        fig_q = make_subplots(rows=2, cols=1, shared_xaxes=True,
+                                             row_heights=[0.7, 0.3], vertical_spacing=0.05)
+                        fig_q.add_trace(go.Candlestick(
+                            x=df_q['date'], open=df_q['open'], high=df_q['high'],
+                            low=df_q['low'], close=df_q['close'],
+                            increasing_line_color='#1DC981', decreasing_line_color='#E8463A',
+                            name='K线'
                         ), row=1, col=1)
-                    vol_colors = ['#1DC981' if c >= o else '#E8463A'
-                                  for c, o in zip(df_q['close'], df_q['open'])]
-                    fig_q.add_trace(go.Bar(
-                        x=df_q['date'], y=df_q['volume'], name='成交量',
-                        marker_color=vol_colors, showlegend=False
-                    ), row=2, col=1)
-                    fig_q.update_layout(title=f"{sel_stock} 日线行情", template="plotly_white", height=500)
-                    fig_q.update_yaxes(title_text="价格", row=1, col=1)
-                    fig_q.update_yaxes(title_text="成交量", row=2, col=1)
-                    fig_q.update_xaxes(rangeslider_visible=False)
-                    st.plotly_chart(fig_q, use_container_width=True)
-        else:
-            st.info("暂无日线数据，请先在数据采集标签页中采集")
-
-        # --- 估值数据可视化 ---
-        st.divider()
-        st.subheader("估值数据概览")
-        st.caption("ℹ️ 已知数据缺口：PE/PB 字段在模块8 回填段（2021 起）全部为零——akshare 日线接口不提供估值列，"
-                   "仅 2026-08 前旧采集期有值（已知缺口#5）。本区图表可能长期为空，字段启用需先解决数据源；"
-                   "估值分位门控（树杈第三层候选）依赖此项审计")
-
-        val_summary = quant_data.get_valuation_summary()
-        val_stocks = [s for s in val_summary if s['pe_ratio'] > 0 or s['pb_ratio'] > 0]
-
-        if val_stocks:
-            # 估值汇总表
-            val_df = pd.DataFrame([{
-                "代码": s["code"],
-                "市场": s["market"],
-                "最新价": s["close"],
-                "PE(市盈率)": round(s["pe_ratio"], 2) if s["pe_ratio"] else None,
-                "PB(市净率)": round(s["pb_ratio"], 2) if s["pb_ratio"] else None,
-                "总市值(亿)": round(s["total_market_cap"] / 1e8, 2) if s["total_market_cap"] else None,
-                "流通市值(亿)": round(s["circ_market_cap"] / 1e8, 2) if s["circ_market_cap"] else None,
-                "数据日期": s["trade_date"],
-            } for s in val_stocks])
-            st.dataframe(val_df, use_container_width=True, hide_index=True)
-
-            # PE/PB 趋势图
-            st.divider()
-            vc1, vc2 = st.columns([3, 1])
-            with vc2:
-                sel_val_stock = st.selectbox("选择股票查看估值趋势", [s["code"] for s in val_stocks], key="val_trend_sel")
-            with vc1:
-                st.write("")
-
-            if sel_val_stock:
-                val_hist = quant_data.get_valuation_history(sel_val_stock, days=365)
-                if val_hist and len(val_hist) > 1:
-                    vh_df = pd.DataFrame(val_hist)
-                    vh_df['trade_date'] = pd.to_datetime(vh_df['trade_date'])
-
-                    fig_val = make_subplots(rows=3, cols=1, shared_xaxes=True,
-                                           row_heights=[0.4, 0.3, 0.3], vertical_spacing=0.08,
-                                           subplot_titles=("收盘价", "PE / PB", "总市值"))
-
-                    # 收盘价
-                    fig_val.add_trace(go.Scatter(
-                        x=vh_df['trade_date'], y=vh_df['close'],
-                        mode='lines', name='收盘价',
-                        line=dict(color='#2196F3', width=2)
-                    ), row=1, col=1)
-
-                    # PE
-                    pe_data = vh_df[vh_df['pe_ratio'] > 0]
-                    if not pe_data.empty:
-                        fig_val.add_trace(go.Scatter(
-                            x=pe_data['trade_date'], y=pe_data['pe_ratio'],
-                            mode='lines+markers', name='PE',
-                            line=dict(color='#E8463A', width=2),
-                            yaxis='y2'
+                        if 'MA20' in df_q.columns:
+                            fig_q.add_trace(go.Scatter(
+                                x=df_q['date'], y=df_q['MA20'],
+                                mode='lines', name='MA20',
+                                line=dict(color='#4B3FE3', width=1)
+                            ), row=1, col=1)
+                        vol_colors = ['#1DC981' if c >= o else '#E8463A'
+                                      for c, o in zip(df_q['close'], df_q['open'])]
+                        fig_q.add_trace(go.Bar(
+                            x=df_q['date'], y=df_q['volume'], name='成交量',
+                            marker_color=vol_colors, showlegend=False
                         ), row=2, col=1)
+                        fig_q.update_layout(title=f"{sel_stock} 日线行情", template="plotly_white", height=500)
+                        fig_q.update_yaxes(title_text="价格", row=1, col=1)
+                        fig_q.update_yaxes(title_text="成交量", row=2, col=1)
+                        fig_q.update_xaxes(rangeslider_visible=False)
+                        st.plotly_chart(fig_q, use_container_width=True)
+            else:
+                st.info("暂无日线数据，请先在数据采集标签页中采集")
 
-                    # PB
-                    pb_data = vh_df[vh_df['pb_ratio'] > 0]
-                    if not pb_data.empty:
-                        fig_val.add_trace(go.Scatter(
-                            x=pb_data['trade_date'], y=pb_data['pb_ratio'],
-                            mode='lines+markers', name='PB',
-                            line=dict(color='#4B3FE3', width=2),
-                            yaxis='y3'
-                        ), row=2, col=1)
-
-                    # 总市值
-                    mc_data = vh_df[vh_df['total_market_cap'] > 0]
-                    if not mc_data.empty:
-                        fig_val.add_trace(go.Bar(
-                            x=mc_data['trade_date'], y=mc_data['total_market_cap'] / 1e8,
-                            name='总市值(亿)', marker_color='#1DC981',
-                            showlegend=False
-                        ), row=3, col=1)
-
-                    fig_val.update_layout(
-                        title=f"{sel_val_stock} 估值趋势",
-                        template="plotly_white", height=600,
-                        xaxis_rangeslider_visible=False,
-                        margin=dict(t=80, b=20)
-                    )
-                    fig_val.update_yaxes(title_text="价格", row=1, col=1)
-                    fig_val.update_yaxes(title_text="PE / PB", row=2, col=1)
-                    fig_val.update_yaxes(title_text="市值(亿)", row=3, col=1)
-                    st.plotly_chart(fig_val, use_container_width=True)
-                else:
-                    st.info(f" {sel_val_stock} 的估值历史数据不足，请先采集更多估值数据")
-
-            # PE 横向对比
+        with st.expander("📁 估值数据（观察档案 · 已知缺口#5: PE/PB 回填段为零）", expanded=ARCHIVE_EXPANDED):
+            # --- 估值数据可视化 ---
             st.divider()
-            st.subheader("股票估值横向对比")
-            comp_stocks = [s for s in val_stocks]
-            fig_pe = go.Figure()
-            fig_pe.add_trace(go.Bar(
-                x=[s["code"] for s in comp_stocks],
-                y=[s["pe_ratio"] for s in comp_stocks],
-                name="PE", marker_color="#E8463A",
-                text=[f"{s['pe_ratio']:.1f}" for s in comp_stocks],
-                textposition="outside"
-            ))
-            fig_pe.update_layout(title="市盈率(PE)对比", template="plotly_white",
-                                 height=300, margin=dict(t=50, b=20),
-                                 xaxis_title="股票", yaxis_title="PE")
-            st.plotly_chart(fig_pe, use_container_width=True)
+            st.subheader("估值数据概览")
+            st.caption("ℹ️ 已知数据缺口：PE/PB 字段在模块8 回填段（2021 起）全部为零——akshare 日线接口不提供估值列，"
+                       "仅 2026-08 前旧采集期有值（已知缺口#5）。本区图表可能长期为空，字段启用需先解决数据源；"
+                       "估值分位门控（树杈第三层候选）依赖此项审计")
 
-            fig_pb = go.Figure()
-            fig_pb.add_trace(go.Bar(
-                x=[s["code"] for s in comp_stocks],
-                y=[s["pb_ratio"] for s in comp_stocks],
-                name="PB", marker_color="#4B3FE3",
-                text=[f"{s['pb_ratio']:.2f}" for s in comp_stocks],
-                textposition="outside"
-            ))
-            fig_pb.update_layout(title="市净率(PB)对比", template="plotly_white",
-                                 height=300, margin=dict(t=50, b=20),
-                                 xaxis_title="股票", yaxis_title="PB")
-            st.plotly_chart(fig_pb, use_container_width=True)
+            val_summary = quant_data.get_valuation_summary()
+            val_stocks = [s for s in val_summary if s['pe_ratio'] > 0 or s['pb_ratio'] > 0]
 
-            fig_mc = go.Figure()
-            fig_mc.add_trace(go.Bar(
-                x=[s["code"] for s in comp_stocks],
-                y=[s["total_market_cap"] / 1e8 for s in comp_stocks],
-                name="总市值(亿)", marker_color="#1DC981",
-                text=[f"{s['total_market_cap']/1e8:.0f}" for s in comp_stocks],
-                textposition="outside"
-            ))
-            fig_mc.update_layout(title="总市值对比(亿元)", template="plotly_white",
-                                 height=300, margin=dict(t=50, b=20),
-                                 xaxis_title="股票", yaxis_title="总市值(亿)")
-            st.plotly_chart(fig_mc, use_container_width=True)
-        else:
-            st.info("暂无估值数据，请先在「数据采集」标签页点击「采集股票池估值」")
+            if val_stocks:
+                # 估值汇总表
+                val_df = pd.DataFrame([{
+                    "代码": s["code"],
+                    "市场": s["market"],
+                    "最新价": s["close"],
+                    "PE(市盈率)": round(s["pe_ratio"], 2) if s["pe_ratio"] else None,
+                    "PB(市净率)": round(s["pb_ratio"], 2) if s["pb_ratio"] else None,
+                    "总市值(亿)": round(s["total_market_cap"] / 1e8, 2) if s["total_market_cap"] else None,
+                    "流通市值(亿)": round(s["circ_market_cap"] / 1e8, 2) if s["circ_market_cap"] else None,
+                    "数据日期": s["trade_date"],
+                } for s in val_stocks])
+                st.dataframe(val_df, use_container_width=True, hide_index=True)
+
+                # PE/PB 趋势图
+                st.divider()
+                vc1, vc2 = st.columns([3, 1])
+                with vc2:
+                    sel_val_stock = st.selectbox("选择股票查看估值趋势", [s["code"] for s in val_stocks], key="val_trend_sel")
+                with vc1:
+                    st.write("")
+
+                if sel_val_stock:
+                    val_hist = quant_data.get_valuation_history(sel_val_stock, days=365)
+                    if val_hist and len(val_hist) > 1:
+                        vh_df = pd.DataFrame(val_hist)
+                        vh_df['trade_date'] = pd.to_datetime(vh_df['trade_date'])
+
+                        fig_val = make_subplots(rows=3, cols=1, shared_xaxes=True,
+                                               row_heights=[0.4, 0.3, 0.3], vertical_spacing=0.08,
+                                               subplot_titles=("收盘价", "PE / PB", "总市值"))
+
+                        # 收盘价
+                        fig_val.add_trace(go.Scatter(
+                            x=vh_df['trade_date'], y=vh_df['close'],
+                            mode='lines', name='收盘价',
+                            line=dict(color='#2196F3', width=2)
+                        ), row=1, col=1)
+
+                        # PE
+                        pe_data = vh_df[vh_df['pe_ratio'] > 0]
+                        if not pe_data.empty:
+                            fig_val.add_trace(go.Scatter(
+                                x=pe_data['trade_date'], y=pe_data['pe_ratio'],
+                                mode='lines+markers', name='PE',
+                                line=dict(color='#E8463A', width=2),
+                                yaxis='y2'
+                            ), row=2, col=1)
+
+                        # PB
+                        pb_data = vh_df[vh_df['pb_ratio'] > 0]
+                        if not pb_data.empty:
+                            fig_val.add_trace(go.Scatter(
+                                x=pb_data['trade_date'], y=pb_data['pb_ratio'],
+                                mode='lines+markers', name='PB',
+                                line=dict(color='#4B3FE3', width=2),
+                                yaxis='y3'
+                            ), row=2, col=1)
+
+                        # 总市值
+                        mc_data = vh_df[vh_df['total_market_cap'] > 0]
+                        if not mc_data.empty:
+                            fig_val.add_trace(go.Bar(
+                                x=mc_data['trade_date'], y=mc_data['total_market_cap'] / 1e8,
+                                name='总市值(亿)', marker_color='#1DC981',
+                                showlegend=False
+                            ), row=3, col=1)
+
+                        fig_val.update_layout(
+                            title=f"{sel_val_stock} 估值趋势",
+                            template="plotly_white", height=600,
+                            xaxis_rangeslider_visible=False,
+                            margin=dict(t=80, b=20)
+                        )
+                        fig_val.update_yaxes(title_text="价格", row=1, col=1)
+                        fig_val.update_yaxes(title_text="PE / PB", row=2, col=1)
+                        fig_val.update_yaxes(title_text="市值(亿)", row=3, col=1)
+                        st.plotly_chart(fig_val, use_container_width=True)
+                    else:
+                        st.info(f" {sel_val_stock} 的估值历史数据不足，请先采集更多估值数据")
+
+                # PE 横向对比
+                st.divider()
+                st.subheader("股票估值横向对比")
+                comp_stocks = [s for s in val_stocks]
+                fig_pe = go.Figure()
+                fig_pe.add_trace(go.Bar(
+                    x=[s["code"] for s in comp_stocks],
+                    y=[s["pe_ratio"] for s in comp_stocks],
+                    name="PE", marker_color="#E8463A",
+                    text=[f"{s['pe_ratio']:.1f}" for s in comp_stocks],
+                    textposition="outside"
+                ))
+                fig_pe.update_layout(title="市盈率(PE)对比", template="plotly_white",
+                                     height=300, margin=dict(t=50, b=20),
+                                     xaxis_title="股票", yaxis_title="PE")
+                st.plotly_chart(fig_pe, use_container_width=True)
+
+                fig_pb = go.Figure()
+                fig_pb.add_trace(go.Bar(
+                    x=[s["code"] for s in comp_stocks],
+                    y=[s["pb_ratio"] for s in comp_stocks],
+                    name="PB", marker_color="#4B3FE3",
+                    text=[f"{s['pb_ratio']:.2f}" for s in comp_stocks],
+                    textposition="outside"
+                ))
+                fig_pb.update_layout(title="市净率(PB)对比", template="plotly_white",
+                                     height=300, margin=dict(t=50, b=20),
+                                     xaxis_title="股票", yaxis_title="PB")
+                st.plotly_chart(fig_pb, use_container_width=True)
+
+                fig_mc = go.Figure()
+                fig_mc.add_trace(go.Bar(
+                    x=[s["code"] for s in comp_stocks],
+                    y=[s["total_market_cap"] / 1e8 for s in comp_stocks],
+                    name="总市值(亿)", marker_color="#1DC981",
+                    text=[f"{s['total_market_cap']/1e8:.0f}" for s in comp_stocks],
+                    textposition="outside"
+                ))
+                fig_mc.update_layout(title="总市值对比(亿元)", template="plotly_white",
+                                     height=300, margin=dict(t=50, b=20),
+                                     xaxis_title="股票", yaxis_title="总市值(亿)")
+                st.plotly_chart(fig_mc, use_container_width=True)
+            else:
+                st.info("暂无估值数据，请先在「数据采集」标签页点击「采集股票池估值」")
 
     # --- Tab 5: 技术因子 (模块2: 基础技术因子计算) ---
     with quant_tab5:
@@ -2123,7 +2134,7 @@ elif page == "量化分析":
 
             # --- ④ 宏观事件研究结果 ---
             # --- ④⑤⑥ 宏观事件研究档案(模块6, 结论已冻结 2026-09-06; 2026-09-19 批次1收纳) ---
-            with st.expander("📁 ④⑤⑥ 宏观事件研究档案（模块6 · 结果/意外方向拆分/映射明细）"):
+            with st.expander("📁 ④⑤⑥ 宏观事件研究档案（模块6 · 结果/意外方向拆分/映射明细）", expanded=ARCHIVE_EXPANDED):
                 st.write("**④ 宏观事件研究结果 (高重要性事件 × 指数 AR/CAR)**")
                 mstudy = quant_data.load_macro_study()
                 mres = mstudy['results']
@@ -2653,7 +2664,7 @@ elif page == "量化分析":
                            "拒掉的触发含正贡献属预期; C3 对「下次财报未知」保守拒绝(排期缺位期间 "
                            "S1aE/S2E 成交为0属预注册行为)。唯一干净裁决 = 📡 前向跟踪页 ⑫ 门控变体裁决读数")
 
-            with st.expander("📁 ⑤ 绩效指标明细（回测档案）"):
+            with st.expander("📁 ⑤ 绩效指标明细（回测档案）", expanded=ARCHIVE_EXPANDED):
                 st.write(f"**⑤ 绩效指标明细 · {bt_seg} 段 × 费率 {bt_fee * 100:.1f}%**")
                 det_rows = []
                 for sid in bt_strats + ['B1', 'B2']:
@@ -2685,7 +2696,7 @@ elif page == "量化分析":
                 st.caption("回撤区间为该段内最大回撤起止日 · 均跳空成本=回测收益−模块3统计收益的均值"
                            "(T+1开盘成交相对信号日收盘买入的执行损耗)")
 
-            with st.expander("📁 ⑥ 费率敏感性（回测档案）"):
+            with st.expander("📁 ⑥ 费率敏感性（回测档案）", expanded=ARCHIVE_EXPANDED):
                 st.write("**⑥ 费率敏感性 (总收益%, 单边 0 / 0.1% / 0.3%)**")
                 fig_fee = make_subplots(rows=1, cols=2, subplot_titles=("full 段", "oos 段"))
                 fee_colors = {0.0: '#43A047', 0.001: '#FB8C00', 0.003: '#E53935'}
@@ -2709,7 +2720,7 @@ elif page == "量化分析":
                 st.caption("费率敏感性=策略对交易成本的稳健性: 高频策略(组合S2/KDJ金叉S1d)在0.3%费率下"
                            "由正转负, 低频策略(大跌S1a/S1b)受费率影响最小")
 
-            with st.expander("📁 ⑦ 交易明细（回测档案）"):
+            with st.expander("📁 ⑦ 交易明细（回测档案）", expanded=ARCHIVE_EXPANDED):
                 # ---- ⑦ 交易明细表 ----
                 st.write(f"**⑦ 交易明细 · {bt_seg} 段 × 费率 {bt_fee * 100:.1f}%**")
                 tv1, tv2 = st.columns([1.5, 3])
@@ -2739,7 +2750,7 @@ elif page == "量化分析":
                         st.write("")
                     st.info(f"{tr_sid} 在 {bt_seg} 段 × 费率{bt_fee * 100:.1f}% 下无成交交易")
 
-            with st.expander("📁 ⑧ 分段稳健性（回测档案）"):
+            with st.expander("📁 ⑧ 分段稳健性（回测档案）", expanded=ARCHIVE_EXPANDED):
                 # ---- ⑧ 分段稳健性 ----
                 st.write(f"**⑧ 分段稳健性 · {bt_seg} 段 (前半/后半年化收益%)**")
                 sr_rows = []
@@ -2764,7 +2775,7 @@ elif page == "量化分析":
                 st.caption("前/后半段 = 日历中点切分的行情regime稳健性口径; 与 full/oos(知识截止日切分,"
                            "管选择偏差控制)是两种并存口径, 用途分开(见下方协议说明)")
 
-            with st.expander("📁 ⑨ 触发与容量诊断（回测档案）"):
+            with st.expander("📁 ⑨ 触发与容量诊断（回测档案）", expanded=ARCHIVE_EXPANDED):
                 # ---- ⑨ 诊断信息 ----
                 st.write(f"**⑨ 触发与容量诊断 · {bt_seg} 段**")
                 dg_rows = []
@@ -3030,7 +3041,7 @@ elif page == "量化分析":
 
             # 被动信号明细
             st.divider()
-            with st.expander("📁 被动信号统计明细与胜率/超额图表（研究档案）"):
+            with st.expander("📁 被动信号统计明细与胜率/超额图表（研究档案）", expanded=ARCHIVE_EXPANDED):
                 st.write("**被动信号统计明细（按信号类型×方向×持有周期）**")
                 by_cal = m3.get("passive_by_caliber") or {"合并": m3["passive"]}
                 cal_options = [c for c in ("合并", "replay", "live") if c in by_cal and by_cal[c]]
@@ -3156,7 +3167,7 @@ elif page == "量化分析":
 
             # 按股票分组统计
             st.divider()
-            with st.expander("📁 按股票分组统计与股票表现差异分析（研究档案）"):
+            with st.expander("📁 按股票分组统计与股票表现差异分析（研究档案）", expanded=ARCHIVE_EXPANDED):
                 st.write("**按股票分组统计（同类信号在不同股票上的表现差异）**")
                 try:
                     per_stock, stock_baselines, stock_rev_baselines = quant_data.compute_per_stock_signal_stats()
@@ -3396,7 +3407,7 @@ elif page == "量化分析":
 
             # 主动事件统计
             st.divider()
-            with st.expander("📁 主动事件统计与发布时点效果（研究档案）"):
+            with st.expander("📁 主动事件统计与发布时点效果（研究档案）", expanded=ARCHIVE_EXPANDED):
                 st.write("**主动事件统计（类型×方向×影响等级）**")
                 evt_rows = []
                 for r in m3["events"]["by_dimension"]:
@@ -3456,7 +3467,7 @@ elif page == "量化分析":
                        f"成功 {_pl_ok}/{_pl_n} 步 · 展开可手动运行/查看失败步骤")
         else:
             st.caption("① 每日管道 · 尚未运行过 · 展开可手动运行")
-        with st.expander("📁 ① 每日管道（手动运行 · 运行日志）"):
+        with st.expander("📁 ① 每日管道（手动运行 · 运行日志）", expanded=ARCHIVE_EXPANDED):
             st.markdown("**① 每日管道**（收盘后运行一次 · 9 步：孤儿股补课 → 行情 → 指数 → 指标 → "
                         "信号扫描 → 宽表 → 宏观日历重采(近3天) → 封锁日台账追加(守卫=完整性截断日) → "
                         "前向记录 → 新鲜度）")
@@ -3718,7 +3729,7 @@ elif page == "量化分析":
         else:
             st.info("暂无前向状态快照")
 
-        with st.expander("📁 ⑥ 前向交易明细（最近 300 笔 · 追加式）"):
+        with st.expander("📁 ⑥ 前向交易明细（最近 300 笔 · 追加式）", expanded=ARCHIVE_EXPANDED):
             # ⑥ 交易明细
             st.markdown("**⑥ 前向交易明细**（最近 300 笔，追加式；尚未到持有期末的交易不入库）")
             if _view['trades']:

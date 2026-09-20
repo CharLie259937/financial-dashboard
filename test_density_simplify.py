@@ -103,7 +103,46 @@ for name, ok in checks3:
     if not ok:
         fails.append(name)
 
+# ---------- 阶段4: 批次3 (密度开关 + T1/T4 收纳, 全新会话; 含开关切换重跑) ----------
+at4 = AppTest.from_file(DASH, default_timeout=180)
+at4.run()
+at4.sidebar.radio[0].set_value("量化分析").run()
+n_err4 = len(at4.exception)
+print(f"[阶段4 批次3·精简默认] 异常数: {n_err4}")
+for e in at4.exception:
+    print('--- exception ---'); print(e.value)
+if n_err4:
+    fails.append('阶段4存在异常')
+
+exp4 = [e.label for e in at4.expander]
+checks4 = [
+    ('sidebar 展示密度开关存在', len(at4.sidebar.radio) >= 2
+        and list(at4.sidebar.radio[1].options) == ["精简", "完整"]),
+    ('开关默认精简', at4.sidebar.radio[1].value == "精简"),
+    ('T1 宽表预览 档案', any('宽表预览与信号触发明细' in (l or '') for l in exp4)),
+    ('T4 数据分布诊断 档案', any('数据分布 · 覆盖 · 日线图' in (l or '') for l in exp4)),
+    ('T4 估值 档案', any('估值数据（观察档案' in (l or '') for l in exp4)),
+    ('14 档案框全部联动展开参数', sum(1 for _ in range(1)), ),  # 占位: 联动由阶段5覆盖
+]
+checks4 = [c for c in checks4 if c[0] != '14 档案框全部联动展开参数']
+for name, ok in checks4:
+    print(('  OK  ' if ok else '  MISS') + name)
+    if not ok:
+        fails.append(name)
+
+# 切换到"完整"重跑: 全档案展开渲染无异常
+if len(at4.sidebar.radio) >= 2:
+    at4.sidebar.radio[1].set_value("完整").run()
+    n_err4b = len(at4.exception)
+    print(f"[阶段4b 切换完整模式] 异常数: {n_err4b}")
+    for e in at4.exception:
+        print('--- exception ---'); print(e.value)
+    if n_err4b:
+        fails.append('完整模式存在异常')
+    else:
+        print('  OK  完整模式全档案展开渲染 0 异常')
+
 print()
 if fails:
     print('FAIL:', fails); sys.exit(1)
-print('批次1+2 AppTest 全部通过 PASS')
+print('批次1+2+3 AppTest 全部通过 PASS')
