@@ -2291,8 +2291,18 @@ elif page == "量化分析":
                     if fv['ledger']:
                         ld_df = pd.DataFrame([{
                             '股票': l['code'], '封锁日数': l['n_days'],
-                            '区间': f"{l['s']} ~ {l['e']}"} for l in fv['ledger']])
+                            '最近封锁日': l['e'], '首次记录': l['s']} for l in fv['ledger']])
                         st.dataframe(ld_df, use_container_width=True, hide_index=True)
+                        _ldt = fv.get('ledger_detail') or []
+                        if _ldt:
+                            st.caption(f"封锁日明细（逐日 · {_ldt[0]['trade_date']} 新→旧 共 {len(_ldt)} 行; "
+                                       "概要表「首次记录」是台账起点而非单一封锁窗)")
+                            ldt_df = pd.DataFrame([{
+                                '封锁交易日': d['trade_date'], '股票': d['code'],
+                                '触发事件': d['group_id'].replace('|', ' · '),
+                                '封锁窗口N': d['window_days']} for d in _ldt])
+                            st.dataframe(ldt_df, use_container_width=True, hide_index=True,
+                                         height=260)
                     else:
                         st.caption("台账为空")
                     st.caption("台账刷新由每日管道执行(守卫=完整性截断日, 已入库净值日期永不回补封锁); "

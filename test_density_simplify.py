@@ -26,10 +26,12 @@ if n_err:
 
 md = '\n'.join(m.value for m in at.markdown)
 exp_labels = [e.label for e in at.expander]
+cap_texts = [c.value for c in at.caption]
 checks1 = [
     ('④⑤⑥ 宏观档案 expander', any('④⑤⑥ 宏观事件研究档案' in (l or '') for l in exp_labels)),
     ('⑦ FDR 提级后仍渲染(md)', '⑦ FDR 多重检验校正' in md),
     ('封锁日台账 提级直接展示(md)', '封锁日台账' in md and '当前因宏观事件封锁的股票与天数' in md),
+    ('封锁日明细 逐日表渲染(caption)', any('封锁日明细' in (t or '') for t in cap_texts)),
     ('BH 存活组明细 仍为 expander', any('BH 存活组明细' in (l or '') for l in exp_labels)),
     ('危机窗相关性 保留', '危机窗相关性' in md),
     ('AH股溢价 保留', 'AH股溢价' in md),

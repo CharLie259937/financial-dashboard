@@ -6407,7 +6407,7 @@ def load_fdr_view():
                         "AND name='macro_fdr_results'").fetchone():
         conn.close()
         return {'results': pd.DataFrame(), 'fdr_meta': {}, 'overlay_meta': {},
-                'ledger': []}
+                'ledger': [], 'ledger_detail': []}
     res = pd.read_sql_query(
         "SELECT window, region, family, index_code, direction, n, car_mean, "
         "t_stat, p_value, p_rank, m_family, bh_critical, q_value, survive, "
@@ -6428,9 +6428,13 @@ def load_fdr_view():
     ledger = [dict(r) for r in conn.execute(
         "SELECT code, COUNT(*) n_days, MIN(trade_date) s, MAX(trade_date) e "
         "FROM macro_overlay_days GROUP BY code ORDER BY code")]
+    # 逐日明细(看板简化后续补 2026-09-21: 概要表只给区间+次数, 具体哪天/哪只/何事件在此)
+    ledger_detail = [dict(r) for r in conn.execute(
+        "SELECT code, trade_date, group_id, window_days FROM macro_overlay_days "
+        "ORDER BY trade_date DESC, code")]
     conn.close()
     return {'results': res, 'fdr_meta': fdr_meta, 'overlay_meta': overlay_meta,
-            'ledger': ledger}
+            'ledger': ledger, 'ledger_detail': ledger_detail}
 
 
 # ============================================================
