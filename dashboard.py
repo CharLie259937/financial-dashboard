@@ -2122,183 +2122,190 @@ elif page == "量化分析":
                 st.plotly_chart(fig_dens, use_container_width=True)
 
             # --- ④ 宏观事件研究结果 ---
-            st.write("**④ 宏观事件研究结果 (高重要性事件 × 指数 AR/CAR)**")
-            mstudy = quant_data.load_macro_study()
-            mres = mstudy['results']
-            if mres.empty:
-                st.info("研究结果为空: 点击上方「运行 / 重跑 宏观事件研究」")
-            else:
-                mmeta = mstudy['meta'] or {}
-                st.caption(f"最近计算: {mmeta.get('run_ts', '—')} · "
-                           f"高重要性事件 {mmeta.get('n_events', '—')} 条 → "
-                           f"{mmeta.get('n_groups', '—')} 组 · "
-                           f"{mmeta.get('caveat', '')}")
-                mwin = st.selectbox(
-                    "统计窗口", ['[0,0]', '[0,+1]', '[0,+3]', '[0,+5]', '[0,+10]', '[-5,+10]'],
-                    index=3, key="qp_macro_win")
-                base_res = mres[(mres['direction'].isna()) & (mres['window'] == mwin) &
-                                (mres['n'] >= 3)].copy()
-                idx_names = {'.INX': '标普500', 'HSI': '恒生指数', 'sh000300': '沪深300'}
-                if base_res.empty:
-                    st.caption("当前窗口无 n≥3 的分组")
+            # --- ④⑤⑥ 宏观事件研究档案(模块6, 结论已冻结 2026-09-06; 2026-09-19 批次1收纳) ---
+            with st.expander("📁 ④⑤⑥ 宏观事件研究档案（模块6 · 结果/意外方向拆分/映射明细）"):
+                st.write("**④ 宏观事件研究结果 (高重要性事件 × 指数 AR/CAR)**")
+                mstudy = quant_data.load_macro_study()
+                mres = mstudy['results']
+                if mres.empty:
+                    st.info("研究结果为空: 点击上方「运行 / 重跑 宏观事件研究」")
                 else:
-                    base_res['指数'] = base_res['index_code'].map(idx_names)
-                    car_col = f'CAR{mwin}%'
-                    show_res = base_res[['family', 'region', '指数', 'n', 'car_mean',
-                                         't_stat', 'p_value', 'sig']].rename(columns={
-                        'family': '事件家族', 'region': '地区', 'n': '样本n',
-                        'car_mean': car_col, 't_stat': 't值',
-                        'p_value': 'p值', 'sig': '显著性'})
-                    show_res[car_col] = pd.to_numeric(show_res[car_col], errors='coerce')
-                    show_res['t值'] = pd.to_numeric(show_res['t值'], errors='coerce')
-                    show_res['p值'] = pd.to_numeric(show_res['p值'], errors='coerce')
-                    show_res = show_res.sort_values(['地区', '事件家族', '指数'])
-                    st.dataframe(show_res, use_container_width=True, hide_index=True)
-                    fig_car = go.Figure()
-                    for code, color in [('.INX', '#1E88E5'), ('HSI', '#E53935'),
-                                        ('sh000300', '#43A047')]:
-                        sub = base_res[base_res['index_code'] == code].sort_values('family')
-                        if not sub.empty:
-                            fig_car.add_trace(go.Bar(
-                                x=sub['family'] + '·' + sub['region'], y=sub['car_mean'],
-                                name=idx_names[code], marker_color=color))
-                    fig_car.add_hline(y=0, line_color='#9E9E9E', line_width=0.8)
-                    fig_car.update_layout(
-                        yaxis_title=f"CAR {mwin} (%)", template="plotly_white", height=420,
-                        legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
-                        xaxis_tickangle=-35)
-                    st.plotly_chart(fig_car, use_container_width=True)
-
-                # --- ⑤ 意外方向拆分 + 曲线 ---
-                st.write("**⑤ 意外方向拆分 (公布 vs 预期) 与 AAR/CAAR 曲线**")
-                dir_res = mres[(mres['direction'].notna()) & (mres['n'] >= 3) &
-                               (~mres['family'].isin(['全部高重要性']))].copy()
-                if dir_res.empty:
-                    st.caption("无可拆分的方向分组(需公布与预期均可解析且 n≥3)")
-                else:
-                    w10 = dir_res[dir_res['window'] == '[0,+10]']
-                    show_dir = w10[['family', 'region', 'direction', 'index_code', 'n',
-                                    'car_mean', 'p_value', 'sig']].rename(columns={
-                        'family': '事件家族', 'region': '地区', 'direction': '意外方向',
-                        'index_code': '指数', 'n': '样本n', 'car_mean': 'CAR[0,+10]%',
-                        'p_value': 'p值', 'sig': '显著性'})
-                    show_dir['指数'] = show_dir['指数'].map(idx_names)
-                    show_dir['CAR[0,+10]%'] = pd.to_numeric(show_dir['CAR[0,+10]%'],
-                                                            errors='coerce')
-                    show_dir['p值'] = pd.to_numeric(show_dir['p值'], errors='coerce')
-                    show_dir = show_dir.sort_values(['事件家族', '意外方向', '指数'])
-                    st.caption("同一事件的相反意外方向 CAR 应显著异号, 否则方向语义不成立")
-                    st.dataframe(show_dir, use_container_width=True, hide_index=True)
-                mcur = mstudy['curves']
-                curve_groups = sorted(set(mres[mres['n'] >= 3]['group_id']))
-                if curve_groups:
-                    sel_g = st.selectbox("曲线分组", curve_groups, index=0,
-                                         format_func=lambda g: g.replace('|', ' · '),
-                                         key="qp_macro_curve")
-                    sub = mcur[mcur['group_id'] == sel_g].sort_values('rel_day')
-                    if not sub.empty:
-                        fig_cv = go.Figure()
-                        fig_cv.add_trace(go.Bar(
-                            x=sub['rel_day'], y=sub['aar'], name='AAR(%)',
-                            marker_color='#90CAF9'))
-                        fig_cv.add_trace(go.Scatter(
-                            x=sub['rel_day'], y=sub['caar'], name='CAAR(%)',
-                            mode='lines+markers', line=dict(color='#E53935', width=2.2)))
-                        fig_cv.add_vline(x=0, line_dash='dot', line_color='#9E9E9E')
-                        fig_cv.update_layout(
-                            xaxis_title="相对交易日 (0=事件日)", yaxis_title="%",
-                            title=sel_g.replace('|', ' · '), template="plotly_white",
-                            height=360, legend=dict(orientation="h", y=1.1, x=0))
-                        st.plotly_chart(fig_cv, use_container_width=True)
-
-                # --- ⑥ 事件明细样例 ---
-                with st.expander("⑥ 事件→交易日映射明细 (最近30条, 含排除原因)"):
-                    mev = mstudy['events'].sort_values('trade_date', ascending=False).head(30)
-                    if mev.empty:
-                        st.caption("无映射明细")
+                    mmeta = mstudy['meta'] or {}
+                    st.caption(f"最近计算: {mmeta.get('run_ts', '—')} · "
+                               f"高重要性事件 {mmeta.get('n_events', '—')} 条 → "
+                               f"{mmeta.get('n_groups', '—')} 组 · "
+                               f"{mmeta.get('caveat', '')}")
+                    mwin = st.selectbox(
+                        "统计窗口", ['[0,0]', '[0,+1]', '[0,+3]', '[0,+5]', '[0,+10]', '[-5,+10]'],
+                        index=3, key="qp_macro_win")
+                    base_res = mres[(mres['direction'].isna()) & (mres['window'] == mwin) &
+                                    (mres['n'] >= 3)].copy()
+                    idx_names = {'.INX': '标普500', 'HSI': '恒生指数', 'sh000300': '沪深300'}
+                    if base_res.empty:
+                        st.caption("当前窗口无 n≥3 的分组")
                     else:
-                        show_ev = mev[['trade_date', 'time', 'region', 'family', 'title',
-                                       'index_code', 't_day', 'included', 'reason']].rename(
-                            columns={'trade_date': '事件日(北京)', 'time': '时刻',
-                                     'region': '地区', 'family': '家族', 'title': '事件',
-                                     'index_code': '指数', 't_day': '映射交易日',
-                                     'included': '纳入', 'reason': '排除原因'})
-                        show_ev['纳入'] = show_ev['纳入'].map({1: '✓', 0: '✗'})
-                        st.dataframe(show_ev, use_container_width=True, hide_index=True)
+                        base_res['指数'] = base_res['index_code'].map(idx_names)
+                        car_col = f'CAR{mwin}%'
+                        show_res = base_res[['family', 'region', '指数', 'n', 'car_mean',
+                                             't_stat', 'p_value', 'sig']].rename(columns={
+                            'family': '事件家族', 'region': '地区', 'n': '样本n',
+                            'car_mean': car_col, 't_stat': 't值',
+                            'p_value': 'p值', 'sig': '显著性'})
+                        show_res[car_col] = pd.to_numeric(show_res[car_col], errors='coerce')
+                        show_res['t值'] = pd.to_numeric(show_res['t值'], errors='coerce')
+                        show_res['p值'] = pd.to_numeric(show_res['p值'], errors='coerce')
+                        show_res = show_res.sort_values(['地区', '事件家族', '指数'])
+                        st.dataframe(show_res, use_container_width=True, hide_index=True)
+                        fig_car = go.Figure()
+                        for code, color in [('.INX', '#1E88E5'), ('HSI', '#E53935'),
+                                            ('sh000300', '#43A047')]:
+                            sub = base_res[base_res['index_code'] == code].sort_values('family')
+                            if not sub.empty:
+                                fig_car.add_trace(go.Bar(
+                                    x=sub['family'] + '·' + sub['region'], y=sub['car_mean'],
+                                    name=idx_names[code], marker_color=color))
+                        fig_car.add_hline(y=0, line_color='#9E9E9E', line_width=0.8)
+                        fig_car.update_layout(
+                            yaxis_title=f"CAR {mwin} (%)", template="plotly_white", height=420,
+                            legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
+                            xaxis_tickangle=-35)
+                        st.plotly_chart(fig_car, use_container_width=True)
+
+                    # --- ⑤ 意外方向拆分 + 曲线 ---
+                    st.write("**⑤ 意外方向拆分 (公布 vs 预期) 与 AAR/CAAR 曲线**")
+                    dir_res = mres[(mres['direction'].notna()) & (mres['n'] >= 3) &
+                                   (~mres['family'].isin(['全部高重要性']))].copy()
+                    if dir_res.empty:
+                        st.caption("无可拆分的方向分组(需公布与预期均可解析且 n≥3)")
+                    else:
+                        w10 = dir_res[dir_res['window'] == '[0,+10]']
+                        show_dir = w10[['family', 'region', 'direction', 'index_code', 'n',
+                                        'car_mean', 'p_value', 'sig']].rename(columns={
+                            'family': '事件家族', 'region': '地区', 'direction': '意外方向',
+                            'index_code': '指数', 'n': '样本n', 'car_mean': 'CAR[0,+10]%',
+                            'p_value': 'p值', 'sig': '显著性'})
+                        show_dir['指数'] = show_dir['指数'].map(idx_names)
+                        show_dir['CAR[0,+10]%'] = pd.to_numeric(show_dir['CAR[0,+10]%'],
+                                                                errors='coerce')
+                        show_dir['p值'] = pd.to_numeric(show_dir['p值'], errors='coerce')
+                        show_dir = show_dir.sort_values(['事件家族', '意外方向', '指数'])
+                        st.caption("同一事件的相反意外方向 CAR 应显著异号, 否则方向语义不成立")
+                        st.dataframe(show_dir, use_container_width=True, hide_index=True)
+                    mcur = mstudy['curves']
+                    curve_groups = sorted(set(mres[mres['n'] >= 3]['group_id']))
+                    if curve_groups:
+                        sel_g = st.selectbox("曲线分组", curve_groups, index=0,
+                                             format_func=lambda g: g.replace('|', ' · '),
+                                             key="qp_macro_curve")
+                        sub = mcur[mcur['group_id'] == sel_g].sort_values('rel_day')
+                        if not sub.empty:
+                            fig_cv = go.Figure()
+                            fig_cv.add_trace(go.Bar(
+                                x=sub['rel_day'], y=sub['aar'], name='AAR(%)',
+                                marker_color='#90CAF9'))
+                            fig_cv.add_trace(go.Scatter(
+                                x=sub['rel_day'], y=sub['caar'], name='CAAR(%)',
+                                mode='lines+markers', line=dict(color='#E53935', width=2.2)))
+                            fig_cv.add_vline(x=0, line_dash='dot', line_color='#9E9E9E')
+                            fig_cv.update_layout(
+                                xaxis_title="相对交易日 (0=事件日)", yaxis_title="%",
+                                title=sel_g.replace('|', ' · '), template="plotly_white",
+                                height=360, legend=dict(orientation="h", y=1.1, x=0))
+                            st.plotly_chart(fig_cv, use_container_width=True)
+
+                    # --- ⑥ 事件明细样例 ---
+                    with st.expander("⑥ 事件→交易日映射明细 (最近30条, 含排除原因)"):
+                        mev = mstudy['events'].sort_values('trade_date', ascending=False).head(30)
+                        if mev.empty:
+                            st.caption("无映射明细")
+                        else:
+                            show_ev = mev[['trade_date', 'time', 'region', 'family', 'title',
+                                           'index_code', 't_day', 'included', 'reason']].rename(
+                                columns={'trade_date': '事件日(北京)', 'time': '时刻',
+                                         'region': '地区', 'family': '家族', 'title': '事件',
+                                         'index_code': '指数', 't_day': '映射交易日',
+                                         'included': '纳入', 'reason': '排除原因'})
+                            show_ev['纳入'] = show_ev['纳入'].map({1: '✓', 0: '✗'})
+                            st.dataframe(show_ev, use_container_width=True, hide_index=True)
+
+            st.write("**⑦ FDR 多重检验校正与宏观 Overlay (模块9)**")
+            try:
+                fv = quant_data.load_fdr_view()
+            except Exception as e:
+                fv = None
+                st.error(f"FDR 面板读取失败: {e}")
+            if fv is not None:
+                if fv['results'].empty:
+                    st.info("FDR 裁决尚未运行(run_macro_fdr): 1602 组名义显著含大量假阳性"
+                            "(预期~80组), 未裁决前不得引用任何\"显著\"组; overlay 家族未选出")
+                else:
+                    fm, om = fv['fdr_meta'], fv['overlay_meta']
+                    lr = fm.get('last_run', {})
+                    fc1, fc2, fc3, fc4 = st.columns(4)
+                    fc1.metric("检验组数(6窗口族)", f"{lr.get('n_rows', 0):,}")
+                    fc2.metric("BH 存活行", lr.get('n_survive_rows', 0))
+                    fc3.metric("Overlay 入选组", lr.get('n_eligible_groups', 0))
+                    fc4.metric("裁决时间", str(lr.get('run_ts', '—'))[:16])
+                    cfg = om.get('config', {})
+                    if cfg.get('groups'):
+                        st.markdown(f"**入选家族** (四条件: BH存活 · n≥{cfg.get('min_n', 30)} · "
+                                    f"CAR<0 只减不加 · 窗口[0,+N]; 护栏: 覆盖率≤{cfg.get('max_cov', 0.5):.0%})")
+                        el_df = pd.DataFrame([{
+                            '地区': g['region'], '事件家族': g['family'],
+                            '指数': g['index_code'], '意外方向': g['direction'],
+                            '封锁窗口N': g['window_days'], '样本n': g['n'],
+                            'CAR均值%': round(g['car_mean'], 2), 't值': round(g['t_stat'], 2),
+                            'p值': round(g['p_value'], 4), 'q值(BH)': round(g['q_value'], 4),
+                            '封锁日覆盖率': f"{max(g['coverage'].values()):.1%}" if g.get('coverage') else '—',
+                        } for g in cfg['groups']])
+                        st.dataframe(el_df, use_container_width=True, hide_index=True)
+                    strata = lr.get('strata', {})
+                    if strata:
+                        st.caption("分层 BH(q=0.05, 每窗口独立检验族): " + " · ".join(
+                            f"{w} m={s['m']}/存活{s['n_survive']}/资格{s['n_eligible']}"
+                            for w, s in sorted(strata.items())))
+                    dg = fm.get('diagnostic_cutoff', {})
+                    if dg:
+                        if dg.get('zero_survival_warning'):
+                            st.error("⚠️ 选择泄漏脆弱性: 主清单在知识截止前子样本中零存活 — "
+                                     "overlay 入选可能完全是截止后数据的产物, 前向裁决前不具任何证据力")
+                        else:
+                            st.caption(f"诊断对照(知识截止 {dg.get('cutoff')} 前子样本, 非门槛): "
+                                       f"主清单 {dg.get('n_main')} 组 / 子样本 {dg.get('n_diag')} 组 / "
+                                       f"重合 {len(dg.get('overlap', []))} — "
+                                       + (f"仅主清单: {', '.join(dg.get('main_only', []))}"
+                                          if dg.get('main_only') else '完全重合'))
+                    st.write("**封锁日台账**（macro_overlay_days · 追加式永不改写 · 当前因宏观事件封锁的股票与天数）")
+
+                    if fv['ledger']:
+                        ld_df = pd.DataFrame([{
+                            '股票': l['code'], '封锁日数': l['n_days'],
+                            '区间': f"{l['s']} ~ {l['e']}"} for l in fv['ledger']])
+                        st.dataframe(ld_df, use_container_width=True, hide_index=True)
+                    else:
+                        st.caption("台账为空")
+                    st.caption("台账刷新由每日管道执行(守卫=完整性截断日, 已入库净值日期永不回补封锁); "
+                               "配置冻结后宏观研究重跑不自动更新 overlay(需新的预注册决策)")
+
+                    with st.expander("BH 存活组明细 (survive=1):"):
+                        surv = fv['results'][fv['results']['survive'] == 1].copy()
+                        if not surv.empty:
+                            show_sv = surv.head(60)[[
+                                'window', 'region', 'family', 'index_code', 'direction',
+                                'n', 'car_mean', 't_stat', 'p_value', 'q_value',
+                                'overlay_eligible', 'eligible_reason']].rename(columns={
+                                    'window': '窗口', 'region': '地区', 'family': '事件家族',
+                                    'index_code': '指数', 'direction': '意外方向', 'n': '样本n',
+                                    'car_mean': 'CAR%', 't_stat': 't值', 'p_value': 'p值',
+                                    'q_value': 'q值', 'overlay_eligible': '入选',
+                                    'eligible_reason': '说明'})
+                            st.dataframe(show_sv, use_container_width=True, hide_index=True)
+                            st.caption("存活≠入选: [0,+0] 无可封锁日、[-5,+10] 含事件前窗、"
+                                       "正CAR(只减不加原则)、n<30、覆盖率>50% 均只记录不行动")
+
 
                 # --- ⑦ FDR 多重检验校正与宏观 Overlay (模块9) ---
-                st.write("**⑦ FDR 多重检验校正与宏观 Overlay (模块9)**")
-                try:
-                    fv = quant_data.load_fdr_view()
-                except Exception as e:
-                    fv = None
-                    st.error(f"FDR 面板读取失败: {e}")
-                if fv is not None:
-                    if fv['results'].empty:
-                        st.info("FDR 裁决尚未运行(run_macro_fdr): 1602 组名义显著含大量假阳性"
-                                "(预期~80组), 未裁决前不得引用任何\"显著\"组; overlay 家族未选出")
-                    else:
-                        fm, om = fv['fdr_meta'], fv['overlay_meta']
-                        lr = fm.get('last_run', {})
-                        fc1, fc2, fc3, fc4 = st.columns(4)
-                        fc1.metric("检验组数(6窗口族)", f"{lr.get('n_rows', 0):,}")
-                        fc2.metric("BH 存活行", lr.get('n_survive_rows', 0))
-                        fc3.metric("Overlay 入选组", lr.get('n_eligible_groups', 0))
-                        fc4.metric("裁决时间", str(lr.get('run_ts', '—'))[:16])
-                        cfg = om.get('config', {})
-                        if cfg.get('groups'):
-                            st.markdown(f"**入选家族** (四条件: BH存活 · n≥{cfg.get('min_n', 30)} · "
-                                        f"CAR<0 只减不加 · 窗口[0,+N]; 护栏: 覆盖率≤{cfg.get('max_cov', 0.5):.0%})")
-                            el_df = pd.DataFrame([{
-                                '地区': g['region'], '事件家族': g['family'],
-                                '指数': g['index_code'], '意外方向': g['direction'],
-                                '封锁窗口N': g['window_days'], '样本n': g['n'],
-                                'CAR均值%': round(g['car_mean'], 2), 't值': round(g['t_stat'], 2),
-                                'p值': round(g['p_value'], 4), 'q值(BH)': round(g['q_value'], 4),
-                                '封锁日覆盖率': f"{max(g['coverage'].values()):.1%}" if g.get('coverage') else '—',
-                            } for g in cfg['groups']])
-                            st.dataframe(el_df, use_container_width=True, hide_index=True)
-                        strata = lr.get('strata', {})
-                        if strata:
-                            st.caption("分层 BH(q=0.05, 每窗口独立检验族): " + " · ".join(
-                                f"{w} m={s['m']}/存活{s['n_survive']}/资格{s['n_eligible']}"
-                                for w, s in sorted(strata.items())))
-                        dg = fm.get('diagnostic_cutoff', {})
-                        if dg:
-                            if dg.get('zero_survival_warning'):
-                                st.error("⚠️ 选择泄漏脆弱性: 主清单在知识截止前子样本中零存活 — "
-                                         "overlay 入选可能完全是截止后数据的产物, 前向裁决前不具任何证据力")
-                            else:
-                                st.caption(f"诊断对照(知识截止 {dg.get('cutoff')} 前子样本, 非门槛): "
-                                           f"主清单 {dg.get('n_main')} 组 / 子样本 {dg.get('n_diag')} 组 / "
-                                           f"重合 {len(dg.get('overlap', []))} — "
-                                           + (f"仅主清单: {', '.join(dg.get('main_only', []))}"
-                                              if dg.get('main_only') else '完全重合'))
-                        with st.expander("BH 存活组明细 (survive=1):"):
-                            surv = fv['results'][fv['results']['survive'] == 1].copy()
-                            if not surv.empty:
-                                show_sv = surv.head(60)[[
-                                    'window', 'region', 'family', 'index_code', 'direction',
-                                    'n', 'car_mean', 't_stat', 'p_value', 'q_value',
-                                    'overlay_eligible', 'eligible_reason']].rename(columns={
-                                        'window': '窗口', 'region': '地区', 'family': '事件家族',
-                                        'index_code': '指数', 'direction': '意外方向', 'n': '样本n',
-                                        'car_mean': 'CAR%', 't_stat': 't值', 'p_value': 'p值',
-                                        'q_value': 'q值', 'overlay_eligible': '入选',
-                                        'eligible_reason': '说明'})
-                                st.dataframe(show_sv, use_container_width=True, hide_index=True)
-                                st.caption("存活≠入选: [0,+0] 无可封锁日、[-5,+10] 含事件前窗、"
-                                           "正CAR(只减不加原则)、n<30、覆盖率>50% 均只记录不行动")
-                        with st.expander("封锁日台账 (macro_overlay_days, 追加式永不改写):"):
-                            if fv['ledger']:
-                                ld_df = pd.DataFrame([{
-                                    '股票': l['code'], '封锁日数': l['n_days'],
-                                    '区间': f"{l['s']} ~ {l['e']}"} for l in fv['ledger']])
-                                st.dataframe(ld_df, use_container_width=True, hide_index=True)
-                            else:
-                                st.caption("台账为空")
-                            st.caption("台账刷新由每日管道执行(守卫=完整性截断日, 已入库净值日期永不回补封锁); "
-                                       "配置冻结后宏观研究重跑不自动更新 overlay(需新的预注册决策)")
+
 
         # ---- ⑧ 危机窗相关性 (O2 · 跨市场报告批判性学习采纳项 2026-09-18) ----
         try:
@@ -3018,408 +3025,413 @@ elif page == "量化分析":
 
             # 被动信号明细
             st.divider()
-            st.write("**被动信号统计明细（按信号类型×方向×持有周期）**")
-            by_cal = m3.get("passive_by_caliber") or {"合并": m3["passive"]}
-            cal_options = [c for c in ("合并", "replay", "live") if c in by_cal and by_cal[c]]
-            cal_names = {"合并": "合并（replay+live，资格判定口径）",
-                         "replay": "仅回放 replay（2021-01 起）",
-                         "live": "仅实采 live（2025-07-29 起）"}
-            passive_sel = m3["passive"]
-            if len(cal_options) > 1:
-                cal_sel = st.radio("统计口径（模块8 双来源分离）", cal_options,
-                                   horizontal=True, format_func=lambda c: cal_names.get(c, c),
-                                   key="m3_caliber")
-                passive_sel = by_cal.get(cal_sel, m3["passive"])
-                st.caption("有效池资格判定以**合并**口径为准（样本最大）；replay/live 口径仅供来源对照，"
-                           "若两口径结论背离，以 live 定观察方向、合并定统计资格")
-            sig_rows = []
-            for r in passive_sel:
-                for n, st_ in r["stats"].items():
-                    _sig = f"{r['signal_type']}|{r['signal_subtype']}"
-                    sig_rows.append({
-                        "信号": _sig,
-                        "采集状态": _sl_status(_sig),
-                        "方向": r["direction"],
-                        "口径": "反向" if st_.get("eval_mode") == "reverse" else "正向",
-                        "周期": f"{n}日",
-                        "触发数": st_["triggers"],
-                        "达标数": st_["win_count"],
-                        "胜率%": st_["win_rate"],
-                        "基准胜率%": st_.get("baseline_win_rate", "—"),
-                        "超额胜率pp": st_.get("excess_win_rate", "—"),
-                        "平均收益%": st_["avg_return"],
-                        "超额收益%": st_.get("excess_return", "—"),
-                        "盈利均值%": st_["avg_win"],
-                        "亏损均值%": st_["avg_loss"],
-                        "盈亏比": st_["profit_loss_ratio"] or "—",
-                        "最大盈亏%": f"{st_['max_win']:.2f} / {st_['max_loss']:.2f}",
-                    })
-            if sig_rows:
-                _sig_df = pd.DataFrame(sig_rows)
-                _order = {'🟢 采集中': 0, '🟡 二期停采': 1, '⛔ 已停采': 2, '—': 3}
-                _sig_df['_ord'] = _sig_df['采集状态'].map(_order).fillna(3)
-                _sig_df = _sig_df.sort_values(['_ord', '信号', '周期']).drop(columns='_ord')
-                _show_stopped = st.toggle("显示已停采子类（历史研究可查, 默认折叠）",
-                                          value=False, key="m3_show_stopped")
-                if not _show_stopped:
-                    _sig_df = _sig_df[_sig_df['采集状态'] != '⛔ 已停采']
-                st.dataframe(_sig_df, use_container_width=True, hide_index=True,
-                             height=400)
-                st.caption("正向口径: 达标数=上涨次数, 平均收益=平均涨幅 · "
-                           "反向口径(看空): 达标数=下跌次数, 胜率=看跌正确率, "
-                           "平均收益=平均跌幅, 基准=随机下跌率, 盈利均值=平均跌幅, 亏损均值=平均反弹 · "
-                           "已停采子类历史行保留(replay 全量生成保证可复现), live 不再新增")
-
-                # --- O1: 分市场分层(跨市场报告批判性学习采纳项 2026-09-18) ---
-                try:
-                    _ms = quant_data.get_signal_market_split_view()
-                    st.write(f"**分市场分层**（keep-5 家族 · 持有{_ms['hold']}日 · "
-                             "市场为二阶因子, 一阶=波动域已门控 S1bV/S2V）")
-                    _ms_rows = []
-                    for _mk, _d in _ms['markets'].items():
-                        for _r in _d['rows']:
-                            _ms_rows.append({
-                                "市场": _mk, "家族": _r['family'], "n": _r['n'],
-                                "胜率%": _r['win_rate'], "基准%": _r['baseline'],
-                                "超额pp": _r['excess'],
-                            })
-                    st.dataframe(pd.DataFrame(_ms_rows), use_container_width=True,
-                                 hide_index=True, height=260)
-                    st.caption(_ms['note'])
-                except Exception as e:
-                    st.error(f"分市场分层读取失败: {e}")
-
-                # 胜率对比图
-                st.write("**各信号胜率 vs 随机基准**")
-                fig_w = go.Figure()
+            with st.expander("📁 被动信号统计明细与胜率/超额图表（研究档案）"):
+                st.write("**被动信号统计明细（按信号类型×方向×持有周期）**")
+                by_cal = m3.get("passive_by_caliber") or {"合并": m3["passive"]}
+                cal_options = [c for c in ("合并", "replay", "live") if c in by_cal and by_cal[c]]
+                cal_names = {"合并": "合并（replay+live，资格判定口径）",
+                             "replay": "仅回放 replay（2021-01 起）",
+                             "live": "仅实采 live（2025-07-29 起）"}
+                passive_sel = m3["passive"]
+                if len(cal_options) > 1:
+                    cal_sel = st.radio("统计口径（模块8 双来源分离）", cal_options,
+                                       horizontal=True, format_func=lambda c: cal_names.get(c, c),
+                                       key="m3_caliber")
+                    passive_sel = by_cal.get(cal_sel, m3["passive"])
+                    st.caption("有效池资格判定以**合并**口径为准（样本最大）；replay/live 口径仅供来源对照，"
+                               "若两口径结论背离，以 live 定观察方向、合并定统计资格")
+                sig_rows = []
                 for r in passive_sel:
-                    label = f"{r['signal_type']}|{r['signal_subtype']}|{r['direction']}"
-                    periods = sorted(r["stats"].keys())
+                    for n, st_ in r["stats"].items():
+                        _sig = f"{r['signal_type']}|{r['signal_subtype']}"
+                        sig_rows.append({
+                            "信号": _sig,
+                            "采集状态": _sl_status(_sig),
+                            "方向": r["direction"],
+                            "口径": "反向" if st_.get("eval_mode") == "reverse" else "正向",
+                            "周期": f"{n}日",
+                            "触发数": st_["triggers"],
+                            "达标数": st_["win_count"],
+                            "胜率%": st_["win_rate"],
+                            "基准胜率%": st_.get("baseline_win_rate", "—"),
+                            "超额胜率pp": st_.get("excess_win_rate", "—"),
+                            "平均收益%": st_["avg_return"],
+                            "超额收益%": st_.get("excess_return", "—"),
+                            "盈利均值%": st_["avg_win"],
+                            "亏损均值%": st_["avg_loss"],
+                            "盈亏比": st_["profit_loss_ratio"] or "—",
+                            "最大盈亏%": f"{st_['max_win']:.2f} / {st_['max_loss']:.2f}",
+                        })
+                if sig_rows:
+                    _sig_df = pd.DataFrame(sig_rows)
+                    _order = {'🟢 采集中': 0, '🟡 二期停采': 1, '⛔ 已停采': 2, '—': 3}
+                    _sig_df['_ord'] = _sig_df['采集状态'].map(_order).fillna(3)
+                    _sig_df = _sig_df.sort_values(['_ord', '信号', '周期']).drop(columns='_ord')
+                    _show_stopped = st.toggle("显示已停采子类（历史研究可查, 默认折叠）",
+                                              value=False, key="m3_show_stopped")
+                    if not _show_stopped:
+                        _sig_df = _sig_df[_sig_df['采集状态'] != '⛔ 已停采']
+                    st.dataframe(_sig_df, use_container_width=True, hide_index=True,
+                                 height=400)
+                    st.caption("正向口径: 达标数=上涨次数, 平均收益=平均涨幅 · "
+                               "反向口径(看空): 达标数=下跌次数, 胜率=看跌正确率, "
+                               "平均收益=平均跌幅, 基准=随机下跌率, 盈利均值=平均跌幅, 亏损均值=平均反弹 · "
+                               "已停采子类历史行保留(replay 全量生成保证可复现), live 不再新增")
+
+
+
+                    # 胜率对比图
+                    st.write("**各信号胜率 vs 随机基准**")
+                    fig_w = go.Figure()
+                    for r in passive_sel:
+                        label = f"{r['signal_type']}|{r['signal_subtype']}|{r['direction']}"
+                        periods = sorted(r["stats"].keys())
+                        fig_w.add_trace(go.Scatter(
+                            x=[f"{n}日" for n in periods],
+                            y=[r["stats"][n]["win_rate"] for n in periods],
+                            mode="lines+markers", name=label[:28]
+                        ))
                     fig_w.add_trace(go.Scatter(
-                        x=[f"{n}日" for n in periods],
-                        y=[r["stats"][n]["win_rate"] for n in periods],
-                        mode="lines+markers", name=label[:28]
+                        x=[f"{n}日" for n in quant_data.HOLD_PERIODS],
+                        y=[baselines[n]["win_rate"] for n in quant_data.HOLD_PERIODS],
+                        mode="lines+markers", name="随机上涨胜率基准",
+                        line=dict(color="#555555", width=3, dash="dash")
                     ))
-                fig_w.add_trace(go.Scatter(
-                    x=[f"{n}日" for n in quant_data.HOLD_PERIODS],
-                    y=[baselines[n]["win_rate"] for n in quant_data.HOLD_PERIODS],
-                    mode="lines+markers", name="随机上涨胜率基准",
-                    line=dict(color="#555555", width=3, dash="dash")
-                ))
-                fig_w.add_trace(go.Scatter(
-                    x=[f"{n}日" for n in quant_data.HOLD_PERIODS],
-                    y=[rev_baselines[n]["win_rate"] for n in quant_data.HOLD_PERIODS],
-                    mode="lines+markers", name="随机下跌率基准(看空对照)",
-                    line=dict(color="#B8860B", width=3, dash="dash")
-                ))
-                fig_w.add_hline(y=55, line_dash="dot", line_color="#E8463A", line_width=1,
-                                annotation_text="55%入选线")
-                fig_w.update_layout(height=430, template="plotly_white",
-                                    yaxis_title="胜率%", margin=dict(t=30, b=20))
-                st.plotly_chart(fig_w, use_container_width=True)
-                st.caption("看多(bullish)曲线对照灰色「随机上涨胜率基准」; "
-                           "看空(bearish)曲线为反向口径(看跌正确率)，对照金色「随机下跌率基准」; "
-                           "红色虚线为55%入选线")
+                    fig_w.add_trace(go.Scatter(
+                        x=[f"{n}日" for n in quant_data.HOLD_PERIODS],
+                        y=[rev_baselines[n]["win_rate"] for n in quant_data.HOLD_PERIODS],
+                        mode="lines+markers", name="随机下跌率基准(看空对照)",
+                        line=dict(color="#B8860B", width=3, dash="dash")
+                    ))
+                    fig_w.add_hline(y=55, line_dash="dot", line_color="#E8463A", line_width=1,
+                                    annotation_text="55%入选线")
+                    fig_w.update_layout(height=430, template="plotly_white",
+                                        yaxis_title="胜率%", margin=dict(t=30, b=20))
+                    st.plotly_chart(fig_w, use_container_width=True)
+                    st.caption("看多(bullish)曲线对照灰色「随机上涨胜率基准」; "
+                               "看空(bearish)曲线为反向口径(看跌正确率)，对照金色「随机下跌率基准」; "
+                               "红色虚线为55%入选线")
 
-                # 超额收益图
-                st.write("**各信号超额收益（信号平均收益 − 随机基准）**")
-                fig_e = go.Figure()
-                for r in passive_sel:
-                    label = f"{r['signal_type']}|{r['signal_subtype']}|{r['direction']}"
-                    periods = sorted(r["stats"].keys())
-                    fig_e.add_trace(go.Bar(
-                        x=[f"{n}日" for n in periods],
-                        y=[r["stats"][n].get("excess_return", 0) for n in periods],
-                        name=label[:28]
-                    ))
-                fig_e.add_hline(y=0, line_color="#888", line_width=1)
-                fig_e.update_layout(height=430, template="plotly_white", barmode="group",
-                                    yaxis_title="超额收益%", margin=dict(t=30, b=20))
-                st.plotly_chart(fig_e, use_container_width=True)
-                st.caption("看空(bearish)信号为反向口径: 超额收益 = 平均跌幅 − 随机平均跌幅, "
-                           "正值表示看空信号触发后跌幅大于随机水平(预警有效)")
+                    # 超额收益图
+                    st.write("**各信号超额收益（信号平均收益 − 随机基准）**")
+                    fig_e = go.Figure()
+                    for r in passive_sel:
+                        label = f"{r['signal_type']}|{r['signal_subtype']}|{r['direction']}"
+                        periods = sorted(r["stats"].keys())
+                        fig_e.add_trace(go.Bar(
+                            x=[f"{n}日" for n in periods],
+                            y=[r["stats"][n].get("excess_return", 0) for n in periods],
+                            name=label[:28]
+                        ))
+                    fig_e.add_hline(y=0, line_color="#888", line_width=1)
+                    fig_e.update_layout(height=430, template="plotly_white", barmode="group",
+                                        yaxis_title="超额收益%", margin=dict(t=30, b=20))
+                    st.plotly_chart(fig_e, use_container_width=True)
+                    st.caption("看空(bearish)信号为反向口径: 超额收益 = 平均跌幅 − 随机平均跌幅, "
+                               "正值表示看空信号触发后跌幅大于随机水平(预警有效)")
+
+            # --- O1: 分市场分层(跨市场报告批判性学习采纳项 2026-09-18) ---
+            try:
+                _ms = quant_data.get_signal_market_split_view()
+                st.write(f"**分市场分层**（keep-5 家族 · 持有{_ms['hold']}日 · "
+                         "市场为二阶因子, 一阶=波动域已门控 S1bV/S2V）")
+                _ms_rows = []
+                for _mk, _d in _ms['markets'].items():
+                    for _r in _d['rows']:
+                        _ms_rows.append({
+                            "市场": _mk, "家族": _r['family'], "n": _r['n'],
+                            "胜率%": _r['win_rate'], "基准%": _r['baseline'],
+                            "超额pp": _r['excess'],
+                        })
+                st.dataframe(pd.DataFrame(_ms_rows), use_container_width=True,
+                             hide_index=True, height=260)
+                st.caption(_ms['note'])
+            except Exception as e:
+                st.error(f"分市场分层读取失败: {e}")
 
             # 按股票分组统计
             st.divider()
-            st.write("**按股票分组统计（同类信号在不同股票上的表现差异）**")
-            try:
-                per_stock, stock_baselines, stock_rev_baselines = quant_data.compute_per_stock_signal_stats()
-            except Exception as e:
-                per_stock, stock_baselines, stock_rev_baselines = {}, {}, {}
-                st.warning(f"按股票分组统计失败: {e}")
+            with st.expander("📁 按股票分组统计与股票表现差异分析（研究档案）"):
+                st.write("**按股票分组统计（同类信号在不同股票上的表现差异）**")
+                try:
+                    per_stock, stock_baselines, stock_rev_baselines = quant_data.compute_per_stock_signal_stats()
+                except Exception as e:
+                    per_stock, stock_baselines, stock_rev_baselines = {}, {}, {}
+                    st.warning(f"按股票分组统计失败: {e}")
 
-            if per_stock:
-                pg1, pg2 = st.columns([2, 1])
-                with pg2:
-                    sel_stock = st.selectbox(
-                        "选择股票查看明细", list(per_stock.keys()), key="qp_m3_stock"
-                    )
-                with pg1:
-                    st.write("")
+                if per_stock:
+                    pg1, pg2 = st.columns([2, 1])
+                    with pg2:
+                        sel_stock = st.selectbox(
+                            "选择股票查看明细", list(per_stock.keys()), key="qp_m3_stock"
+                        )
+                    with pg1:
+                        st.write("")
 
-                # 该股随机基准
-                if sel_stock in stock_baselines:
-                    sb = stock_baselines[sel_stock]
-                    srb = stock_rev_baselines.get(sel_stock, {})
-                    sb_df = pd.DataFrame([{
-                        "周期": f"{n}日",
-                        "该股随机胜率%": sb[n]["win_rate"] if sb.get(n) else "—",
-                        "该股随机下跌率%": srb[n]["win_rate"] if srb.get(n) else "—",
-                        "该股随机均收%": sb[n]["avg_return"] if sb.get(n) else "—",
-                    } for n in quant_data.HOLD_PERIODS])
-                    st.caption(f"{sel_stock} 自身随机基准（该股全部交易日买入持有）:")
-                    st.dataframe(sb_df, use_container_width=True, hide_index=True)
+                    # 该股随机基准
+                    if sel_stock in stock_baselines:
+                        sb = stock_baselines[sel_stock]
+                        srb = stock_rev_baselines.get(sel_stock, {})
+                        sb_df = pd.DataFrame([{
+                            "周期": f"{n}日",
+                            "该股随机胜率%": sb[n]["win_rate"] if sb.get(n) else "—",
+                            "该股随机下跌率%": srb[n]["win_rate"] if srb.get(n) else "—",
+                            "该股随机均收%": sb[n]["avg_return"] if sb.get(n) else "—",
+                        } for n in quant_data.HOLD_PERIODS])
+                        st.caption(f"{sel_stock} 自身随机基准（该股全部交易日买入持有）:")
+                        st.dataframe(sb_df, use_container_width=True, hide_index=True)
 
-                ps_rows = []
-                for (sig_type, subtype, direction), stats in per_stock.get(sel_stock, {}).items():
-                    for n, st_ in sorted(stats.items()):
-                        ps_rows.append({
-                            "信号": f"{sig_type}|{subtype}",
-                            "方向": direction,
+                    ps_rows = []
+                    for (sig_type, subtype, direction), stats in per_stock.get(sel_stock, {}).items():
+                        for n, st_ in sorted(stats.items()):
+                            ps_rows.append({
+                                "信号": f"{sig_type}|{subtype}",
+                                "方向": direction,
+                                "口径": "反向" if st_.get("eval_mode") == "reverse" else "正向",
+                                "周期": f"{n}日",
+                                "触发数": st_["triggers"],
+                                "胜率%": st_["win_rate"],
+                                "该股基准%": st_.get("baseline_win_rate", "—"),
+                                "超额胜率pp": st_.get("excess_win_rate", "—"),
+                                "平均收益%": st_["avg_return"],
+                                "超额收益%": st_.get("excess_return", "—"),
+                                "盈亏比": st_["profit_loss_ratio"] or "—",
+                            })
+                    if ps_rows:
+                        st.dataframe(pd.DataFrame(ps_rows), use_container_width=True,
+                                     hide_index=True, height=350)
+                    else:
+                        st.info("该股票暂无信号统计")
+
+                    # 横向对比图: 各股票同类信号胜率 (选信号类型)
+                    all_sig_keys = set()
+                    for code, groups in per_stock.items():
+                        all_sig_keys.update(groups.keys())
+                    sig_labels = {k: f"{k[0]}|{k[1]}|{k[2]}" for k in all_sig_keys}
+
+                    hc1, hc2 = st.columns([2, 1])
+                    with hc2:
+                        sel_sig = st.selectbox(
+                            "选择信号横向对比", sorted(sig_labels.values()), key="qp_m3_sig"
+                        )
+                        cmp_period = st.selectbox(
+                            "对比周期", [1, 3, 5, 10], index=1, key="qp_m3_cmp_period"
+                        )
+                    with hc1:
+                        st.write("")
+
+                    sel_key = next((k for k, v in sig_labels.items() if v == sel_sig), None)
+                    if sel_key:
+                        # 看空信号为反向口径, 对照该股随机下跌率基准
+                        sel_reverse = (sel_key[2] == 'bearish')
+                        fig_cmp = go.Figure()
+                        codes_x, wr_y, bl_y, n_labels = [], [], [], []
+                        for code in sorted(per_stock.keys()):
+                            stt = per_stock[code].get(sel_key, {}).get(cmp_period)
+                            bl_src = (stock_rev_baselines if sel_reverse else stock_baselines)
+                            bl = bl_src.get(code, {}).get(cmp_period)
+                            if stt:
+                                codes_x.append(code)
+                                wr_y.append(stt["win_rate"])
+                                bl_y.append(bl["win_rate"] if bl else None)
+                                n_labels.append(f"n={stt['triggers']}")
+                        if codes_x:
+                            fig_cmp.add_trace(go.Bar(
+                                x=codes_x, y=wr_y,
+                                name="看跌正确率" if sel_reverse else "信号胜率",
+                                marker_color="#4f46e5",
+                                text=n_labels, textposition="outside",
+                            ))
+                            bl_valid = [b for b in bl_y if b is not None]
+                            if bl_valid:
+                                fig_cmp.add_trace(go.Scatter(
+                                    x=codes_x, y=bl_y,
+                                    name="该股随机下跌率基准" if sel_reverse else "该股随机基准",
+                                    mode="lines+markers",
+                                    line=dict(color="#555555", width=2, dash="dash")
+                                ))
+                            fig_cmp.add_hline(y=55, line_dash="dot", line_color="#E8463A",
+                                              line_width=1, annotation_text="55%线")
+                            fig_cmp.update_layout(
+                                height=360, template="plotly_white", barmode="group",
+                                yaxis_title="胜率%", title=f"{sel_sig} · {cmp_period}日周期"
+                                + ("（反向口径: 看跌正确率）" if sel_reverse else ""),
+                                margin=dict(t=50, b=20)
+                            )
+                            st.plotly_chart(fig_cmp, use_container_width=True)
+
+                # --- 股票表现差异分析 ---
+                st.divider()
+                st.write("**股票表现差异分析**")
+                st.caption("差异分析基于: ① 各股趋势画像 ② 信号适应性(每股加权平均超额胜率) ③ 信号一致性(同类信号在各股是否同向有效)"
+                           " · 看空信号的超额按反向口径计算(看跌超额正确率), 与看多信号同向可比")
+                try:
+                    diff = quant_data.compute_stock_diff_analysis(per_stock, stock_baselines)
+                except Exception as e:
+                    diff = {'stock_adapt': {}, 'consistency': []}
+                    st.warning(f"差异分析失败: {e}")
+
+                if diff['stock_adapt']:
+                    # 信号适应性: 各股加权平均超额胜率
+                    adapt_rows = []
+                    for code in sorted(diff['stock_adapt'].keys()):
+                        row = {"代码": code}
+                        for n in quant_data.HOLD_PERIODS:
+                            a = diff['stock_adapt'][code].get(n)
+                            row[f"{n}日超额pp"] = a['avg_excess'] if a else None
+                            row[f"{n}日样本"] = a['triggers'] if a else 0
+                        adapt_rows.append(row)
+                    adapt_df = pd.DataFrame(adapt_rows)
+                    st.write("① 信号适应性 — 每股全部信号的加权平均超额胜率（正值=信号整体跑赢该股随机基准）")
+                    st.dataframe(adapt_df, use_container_width=True, hide_index=True)
+
+                    fig_ad = go.Figure()
+                    for n in quant_data.HOLD_PERIODS:
+                        codes_x, y_vals = [], []
+                        for code in sorted(diff['stock_adapt'].keys()):
+                            a = diff['stock_adapt'][code].get(n)
+                            if a:
+                                codes_x.append(code)
+                                y_vals.append(a['avg_excess'])
+                        if codes_x:
+                            fig_ad.add_trace(go.Bar(x=codes_x, y=y_vals, name=f"{n}日"))
+                    fig_ad.add_hline(y=0, line_color="#888", line_width=1)
+                    fig_ad.update_layout(height=340, template="plotly_white", barmode="group",
+                                         yaxis_title="加权平均超额胜率(pp)",
+                                         title="各股信号适应性对比", margin=dict(t=50, b=20))
+                    st.plotly_chart(fig_ad, use_container_width=True)
+
+                    # 趋势对照
+                    if profiles:
+                        st.caption("趋势对照: " + " · ".join(
+                            f"{p['code']} 年化{p['annualized']}%({p['trend']})" for p in profiles))
+
+                if diff['consistency']:
+                    st.write("② 信号一致性 — 同类信号在各股的3日超额胜率方向（≥2只股票才参与判断）")
+                    cons_rows = []
+                    for c in diff['consistency']:
+                        cons_rows.append({
+                            "信号": c['signal'],
+                            "类型": c['kind'],
+                            "有效股票数": f"{c['positive']}/{c['total']}",
+                            "最佳": f"{c['best_stock']['code']}(+{c['best_stock']['excess']}pp)",
+                            "最差": f"{c['worst_stock']['code']}({c['worst_stock']['excess']}pp)",
+                        })
+                    cons_df = pd.DataFrame(cons_rows)
+                    st.dataframe(cons_df, use_container_width=True, hide_index=True, height=300)
+
+                    # 热力图: 信号×股票 超额胜率
+                    sig_names = [c['signal'] for c in diff['consistency']]
+                    all_codes = sorted(per_stock.keys())
+                    z_matrix, z_text = [], []
+                    for c in diff['consistency']:
+                        dmap = {r['code']: r['excess'] for r in c['detail']}
+                        z_matrix.append([dmap.get(code, None) for code in all_codes])
+                        z_text.append([f"{dmap.get(code, '—')}" if dmap.get(code) is not None else '—'
+                                       for code in all_codes])
+                    fig_hm = go.Figure(go.Heatmap(
+                        z=z_matrix, x=all_codes, y=sig_names, text=z_text,
+                        texttemplate="%{text}", colorscale="RdYlGn", zmid=0,
+                        colorbar_title="超额胜率pp",
+                    ))
+                    fig_hm.update_layout(height=420, template="plotly_white",
+                                         title="信号 × 股票 超额胜率热力图（3日周期，绿=正 红=负）",
+                                         margin=dict(t=50, b=20))
+                    st.plotly_chart(fig_hm, use_container_width=True)
+
+                    # 自动结论
+                    universal_ok = [c for c in diff['consistency'] if c['kind'] == '普适有效']
+                    universal_bad = [c for c in diff['consistency'] if c['kind'] == '普适失效']
+                    dependent = [c for c in diff['consistency'] if c['kind'] == '个股依赖']
+                    adapt_best, adapt_worst = None, None
+                    if diff['stock_adapt']:
+                        adapt_3d = {code: v.get(3, {}).get('avg_excess')
+                                    for code, v in diff['stock_adapt'].items() if v.get(3)}
+                        if adapt_3d:
+                            adapt_best = max(adapt_3d, key=adapt_3d.get)
+                            adapt_worst = min(adapt_3d, key=adapt_3d.get)
+
+                    conclusions = []
+                    if adapt_best is not None:
+                        conclusions.append(
+                            f"信号适应性最高: **{adapt_best}**（3日加权超额 "
+                            f"+{diff['stock_adapt'][adapt_best][3]['avg_excess']}pp）— 信号在该股整体有效"
+                        )
+                    if adapt_worst is not None and adapt_worst != adapt_best:
+                        conclusions.append(
+                            f"信号适应性最低: **{adapt_worst}**（3日加权超额 "
+                            f"{diff['stock_adapt'][adapt_worst][3]['avg_excess']}pp）— 该股不适合照搬信号"
+                        )
+                    if universal_ok:
+                        names = '、'.join(c['signal'] for c in universal_ok[:3])
+                        conclusions.append(f"普适有效信号（全部股票超额为正）: {names}")
+                    if universal_bad:
+                        names = '、'.join(c['signal'] for c in universal_bad[:3])
+                        conclusions.append(f"普适失效信号（全部股票超额为负，建议弃用）: {names}")
+                    if dependent:
+                        spread = max(
+                            (c['best_stock']['excess'] - c['worst_stock']['excess'])
+                            for c in dependent)
+                        conclusions.append(
+                            f"个股依赖信号 {len(dependent)} 类，最大跨度达 {spread:.1f}pp — "
+                            f"同一信号在不同股票效果相反，须结合个股趋势选用"
+                        )
+                    if profiles:
+                        up_stocks = [p['code'] for p in profiles if '上涨' in p['trend']]
+                        down_stocks = [p['code'] for p in profiles if '下跌' in p['trend']]
+                        if up_stocks and down_stocks:
+                            conclusions.append(
+                                f"趋势归因: {('/'.join(up_stocks))} 处上涨趋势（顺势信号占优），"
+                                f"{('/'.join(down_stocks))} 处下跌趋势（抄底类信号普遍失效）"
+                            )
+                    if conclusions:
+                        st.write("③ 自动结论")
+                        for cc in conclusions:
+                            st.markdown(f"- {cc}")
+
+            # 主动事件统计
+            st.divider()
+            with st.expander("📁 主动事件统计与发布时点效果（研究档案）"):
+                st.write("**主动事件统计（类型×方向×影响等级）**")
+                evt_rows = []
+                for r in m3["events"]["by_dimension"]:
+                    for n, st_ in r["stats"].items():
+                        evt_rows.append({
+                            "事件类型": r["key"][0], "方向": r["key"][1], "影响等级": r["key"][2],
                             "口径": "反向" if st_.get("eval_mode") == "reverse" else "正向",
                             "周期": f"{n}日",
                             "触发数": st_["triggers"],
                             "胜率%": st_["win_rate"],
-                            "该股基准%": st_.get("baseline_win_rate", "—"),
                             "超额胜率pp": st_.get("excess_win_rate", "—"),
                             "平均收益%": st_["avg_return"],
                             "超额收益%": st_.get("excess_return", "—"),
                             "盈亏比": st_["profit_loss_ratio"] or "—",
                         })
-                if ps_rows:
-                    st.dataframe(pd.DataFrame(ps_rows), use_container_width=True,
-                                 hide_index=True, height=350)
+                if evt_rows:
+                    st.dataframe(pd.DataFrame(evt_rows), use_container_width=True, hide_index=True)
+                    st.caption("利空(bearish)事件为反向口径: 胜率=事件后下跌占比, 平均收益=平均跌幅, "
+                               "超额为正表示利空事件确实伴随超常下跌")
                 else:
-                    st.info("该股票暂无信号统计")
+                    st.info("暂无主动事件数据")
 
-                # 横向对比图: 各股票同类信号胜率 (选信号类型)
-                all_sig_keys = set()
-                for code, groups in per_stock.items():
-                    all_sig_keys.update(groups.keys())
-                sig_labels = {k: f"{k[0]}|{k[1]}|{k[2]}" for k in all_sig_keys}
-
-                hc1, hc2 = st.columns([2, 1])
-                with hc2:
-                    sel_sig = st.selectbox(
-                        "选择信号横向对比", sorted(sig_labels.values()), key="qp_m3_sig"
-                    )
-                    cmp_period = st.selectbox(
-                        "对比周期", [1, 3, 5, 10], index=1, key="qp_m3_cmp_period"
-                    )
-                with hc1:
-                    st.write("")
-
-                sel_key = next((k for k, v in sig_labels.items() if v == sel_sig), None)
-                if sel_key:
-                    # 看空信号为反向口径, 对照该股随机下跌率基准
-                    sel_reverse = (sel_key[2] == 'bearish')
-                    fig_cmp = go.Figure()
-                    codes_x, wr_y, bl_y, n_labels = [], [], [], []
-                    for code in sorted(per_stock.keys()):
-                        stt = per_stock[code].get(sel_key, {}).get(cmp_period)
-                        bl_src = (stock_rev_baselines if sel_reverse else stock_baselines)
-                        bl = bl_src.get(code, {}).get(cmp_period)
-                        if stt:
-                            codes_x.append(code)
-                            wr_y.append(stt["win_rate"])
-                            bl_y.append(bl["win_rate"] if bl else None)
-                            n_labels.append(f"n={stt['triggers']}")
-                    if codes_x:
-                        fig_cmp.add_trace(go.Bar(
-                            x=codes_x, y=wr_y,
-                            name="看跌正确率" if sel_reverse else "信号胜率",
-                            marker_color="#4f46e5",
-                            text=n_labels, textposition="outside",
-                        ))
-                        bl_valid = [b for b in bl_y if b is not None]
-                        if bl_valid:
-                            fig_cmp.add_trace(go.Scatter(
-                                x=codes_x, y=bl_y,
-                                name="该股随机下跌率基准" if sel_reverse else "该股随机基准",
-                                mode="lines+markers",
-                                line=dict(color="#555555", width=2, dash="dash")
-                            ))
-                        fig_cmp.add_hline(y=55, line_dash="dot", line_color="#E8463A",
-                                          line_width=1, annotation_text="55%线")
-                        fig_cmp.update_layout(
-                            height=360, template="plotly_white", barmode="group",
-                            yaxis_title="胜率%", title=f"{sel_sig} · {cmp_period}日周期"
-                            + ("（反向口径: 看跌正确率）" if sel_reverse else ""),
-                            margin=dict(t=50, b=20)
-                        )
-                        st.plotly_chart(fig_cmp, use_container_width=True)
-
-            # --- 股票表现差异分析 ---
-            st.divider()
-            st.write("**股票表现差异分析**")
-            st.caption("差异分析基于: ① 各股趋势画像 ② 信号适应性(每股加权平均超额胜率) ③ 信号一致性(同类信号在各股是否同向有效)"
-                       " · 看空信号的超额按反向口径计算(看跌超额正确率), 与看多信号同向可比")
-            try:
-                diff = quant_data.compute_stock_diff_analysis(per_stock, stock_baselines)
-            except Exception as e:
-                diff = {'stock_adapt': {}, 'consistency': []}
-                st.warning(f"差异分析失败: {e}")
-
-            if diff['stock_adapt']:
-                # 信号适应性: 各股加权平均超额胜率
-                adapt_rows = []
-                for code in sorted(diff['stock_adapt'].keys()):
-                    row = {"代码": code}
-                    for n in quant_data.HOLD_PERIODS:
-                        a = diff['stock_adapt'][code].get(n)
-                        row[f"{n}日超额pp"] = a['avg_excess'] if a else None
-                        row[f"{n}日样本"] = a['triggers'] if a else 0
-                    adapt_rows.append(row)
-                adapt_df = pd.DataFrame(adapt_rows)
-                st.write("① 信号适应性 — 每股全部信号的加权平均超额胜率（正值=信号整体跑赢该股随机基准）")
-                st.dataframe(adapt_df, use_container_width=True, hide_index=True)
-
-                fig_ad = go.Figure()
-                for n in quant_data.HOLD_PERIODS:
-                    codes_x, y_vals = [], []
-                    for code in sorted(diff['stock_adapt'].keys()):
-                        a = diff['stock_adapt'][code].get(n)
-                        if a:
-                            codes_x.append(code)
-                            y_vals.append(a['avg_excess'])
-                    if codes_x:
-                        fig_ad.add_trace(go.Bar(x=codes_x, y=y_vals, name=f"{n}日"))
-                fig_ad.add_hline(y=0, line_color="#888", line_width=1)
-                fig_ad.update_layout(height=340, template="plotly_white", barmode="group",
-                                     yaxis_title="加权平均超额胜率(pp)",
-                                     title="各股信号适应性对比", margin=dict(t=50, b=20))
-                st.plotly_chart(fig_ad, use_container_width=True)
-
-                # 趋势对照
-                if profiles:
-                    st.caption("趋势对照: " + " · ".join(
-                        f"{p['code']} 年化{p['annualized']}%({p['trend']})" for p in profiles))
-
-            if diff['consistency']:
-                st.write("② 信号一致性 — 同类信号在各股的3日超额胜率方向（≥2只股票才参与判断）")
-                cons_rows = []
-                for c in diff['consistency']:
-                    cons_rows.append({
-                        "信号": c['signal'],
-                        "类型": c['kind'],
-                        "有效股票数": f"{c['positive']}/{c['total']}",
-                        "最佳": f"{c['best_stock']['code']}(+{c['best_stock']['excess']}pp)",
-                        "最差": f"{c['worst_stock']['code']}({c['worst_stock']['excess']}pp)",
-                    })
-                cons_df = pd.DataFrame(cons_rows)
-                st.dataframe(cons_df, use_container_width=True, hide_index=True, height=300)
-
-                # 热力图: 信号×股票 超额胜率
-                sig_names = [c['signal'] for c in diff['consistency']]
-                all_codes = sorted(per_stock.keys())
-                z_matrix, z_text = [], []
-                for c in diff['consistency']:
-                    dmap = {r['code']: r['excess'] for r in c['detail']}
-                    z_matrix.append([dmap.get(code, None) for code in all_codes])
-                    z_text.append([f"{dmap.get(code, '—')}" if dmap.get(code) is not None else '—'
-                                   for code in all_codes])
-                fig_hm = go.Figure(go.Heatmap(
-                    z=z_matrix, x=all_codes, y=sig_names, text=z_text,
-                    texttemplate="%{text}", colorscale="RdYlGn", zmid=0,
-                    colorbar_title="超额胜率pp",
-                ))
-                fig_hm.update_layout(height=420, template="plotly_white",
-                                     title="信号 × 股票 超额胜率热力图（3日周期，绿=正 红=负）",
-                                     margin=dict(t=50, b=20))
-                st.plotly_chart(fig_hm, use_container_width=True)
-
-                # 自动结论
-                universal_ok = [c for c in diff['consistency'] if c['kind'] == '普适有效']
-                universal_bad = [c for c in diff['consistency'] if c['kind'] == '普适失效']
-                dependent = [c for c in diff['consistency'] if c['kind'] == '个股依赖']
-                adapt_best, adapt_worst = None, None
-                if diff['stock_adapt']:
-                    adapt_3d = {code: v.get(3, {}).get('avg_excess')
-                                for code, v in diff['stock_adapt'].items() if v.get(3)}
-                    if adapt_3d:
-                        adapt_best = max(adapt_3d, key=adapt_3d.get)
-                        adapt_worst = min(adapt_3d, key=adapt_3d.get)
-
-                conclusions = []
-                if adapt_best is not None:
-                    conclusions.append(
-                        f"信号适应性最高: **{adapt_best}**（3日加权超额 "
-                        f"+{diff['stock_adapt'][adapt_best][3]['avg_excess']}pp）— 信号在该股整体有效"
-                    )
-                if adapt_worst is not None and adapt_worst != adapt_best:
-                    conclusions.append(
-                        f"信号适应性最低: **{adapt_worst}**（3日加权超额 "
-                        f"{diff['stock_adapt'][adapt_worst][3]['avg_excess']}pp）— 该股不适合照搬信号"
-                    )
-                if universal_ok:
-                    names = '、'.join(c['signal'] for c in universal_ok[:3])
-                    conclusions.append(f"普适有效信号（全部股票超额为正）: {names}")
-                if universal_bad:
-                    names = '、'.join(c['signal'] for c in universal_bad[:3])
-                    conclusions.append(f"普适失效信号（全部股票超额为负，建议弃用）: {names}")
-                if dependent:
-                    spread = max(
-                        (c['best_stock']['excess'] - c['worst_stock']['excess'])
-                        for c in dependent)
-                    conclusions.append(
-                        f"个股依赖信号 {len(dependent)} 类，最大跨度达 {spread:.1f}pp — "
-                        f"同一信号在不同股票效果相反，须结合个股趋势选用"
-                    )
-                if profiles:
-                    up_stocks = [p['code'] for p in profiles if '上涨' in p['trend']]
-                    down_stocks = [p['code'] for p in profiles if '下跌' in p['trend']]
-                    if up_stocks and down_stocks:
-                        conclusions.append(
-                            f"趋势归因: {('/'.join(up_stocks))} 处上涨趋势（顺势信号占优），"
-                            f"{('/'.join(down_stocks))} 处下跌趋势（抄底类信号普遍失效）"
-                        )
-                if conclusions:
-                    st.write("③ 自动结论")
-                    for cc in conclusions:
-                        st.markdown(f"- {cc}")
-
-            # 主动事件统计
-            st.divider()
-            st.write("**主动事件统计（类型×方向×影响等级）**")
-            evt_rows = []
-            for r in m3["events"]["by_dimension"]:
-                for n, st_ in r["stats"].items():
-                    evt_rows.append({
-                        "事件类型": r["key"][0], "方向": r["key"][1], "影响等级": r["key"][2],
-                        "口径": "反向" if st_.get("eval_mode") == "reverse" else "正向",
-                        "周期": f"{n}日",
-                        "触发数": st_["triggers"],
-                        "胜率%": st_["win_rate"],
-                        "超额胜率pp": st_.get("excess_win_rate", "—"),
-                        "平均收益%": st_["avg_return"],
-                        "超额收益%": st_.get("excess_return", "—"),
-                        "盈亏比": st_["profit_loss_ratio"] or "—",
-                    })
-            if evt_rows:
-                st.dataframe(pd.DataFrame(evt_rows), use_container_width=True, hide_index=True)
-                st.caption("利空(bearish)事件为反向口径: 胜率=事件后下跌占比, 平均收益=平均跌幅, "
-                           "超额为正表示利空事件确实伴随超常下跌")
-            else:
-                st.info("暂无主动事件数据")
-
-            st.write("**事件发布时点效果（盘前/盘中/盘后）**")
-            tm_rows = []
-            for r in m3["events"]["by_time"]:
-                for n, st_ in r["stats"].items():
-                    tm_rows.append({
-                        "事件类型": r["key"][0], "发布时点": r["key"][1],
-                        "周期": f"{n}日",
-                        "触发数": st_["triggers"],
-                        "胜率%": st_["win_rate"],
-                        "平均收益%": st_["avg_return"],
-                        "超额收益%": st_.get("excess_return", "—"),
-                    })
-            if tm_rows:
-                st.dataframe(pd.DataFrame(tm_rows), use_container_width=True, hide_index=True)
-                st.caption("时点分组混合利好/利空事件, 统一为正向口径(上涨胜率), "
-                           "反映不同发布时点的市场整体消化速度")
-            else:
-                st.info("暂无事件时点数据")
+                st.write("**事件发布时点效果（盘前/盘中/盘后）**")
+                tm_rows = []
+                for r in m3["events"]["by_time"]:
+                    for n, st_ in r["stats"].items():
+                        tm_rows.append({
+                            "事件类型": r["key"][0], "发布时点": r["key"][1],
+                            "周期": f"{n}日",
+                            "触发数": st_["triggers"],
+                            "胜率%": st_["win_rate"],
+                            "平均收益%": st_["avg_return"],
+                            "超额收益%": st_.get("excess_return", "—"),
+                        })
+                if tm_rows:
+                    st.dataframe(pd.DataFrame(tm_rows), use_container_width=True, hide_index=True)
+                    st.caption("时点分组混合利好/利空事件, 统一为正向口径(上涨胜率), "
+                               "反映不同发布时点的市场整体消化速度")
+                else:
+                    st.info("暂无事件时点数据")
 
             st.caption("结果已同步入库: signal_effect_report 表（可用 DB Browser 查看《埋点信号效果总表》）")
 

@@ -38,9 +38,9 @@ if not at.exception:
     ]
     for name, ok in checks:
         print(('  OK  ' if ok else '  MISS') + name)
-    # st.progress 数量(D1 卡片 7 个: S1d/S1e/S2M/S1aM/S2Q + S1aE/S2E 模块12 P0 预注册)
+    # st.progress 数量(D1 卡片 10 个: S1d/S1e/S2M/S1aM/S2Q + S1aE/S2E + S1bV/S2V + S2K6)
     n_prog = len(at.get('progress'))
-    print('  progress 组件数:', n_prog, '(期望 7)' if n_prog == 7 else '(异常, 期望 7)')
+    print('  progress 组件数:', n_prog, '(期望 10: S1d/S1e/S2M/S1aM/S2Q + S1aE/S2E + S1bV/S2V + S2K6)' if n_prog == 10 else '(异常, 期望 10)')
     # st.warning (停采生效日后新增行提示)
     warn_texts = [w.value for w in at.warning]
     print('  warning:', len(warn_texts), warn_texts[:2])

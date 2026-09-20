@@ -33,6 +33,8 @@
 !test_d3_tab.py
 !test_s2_apptest.py
 !test_s2_streamline.py
+!test_density_simplify.py
+!_patch_simplify_b1.py
 
 # --- docs ---
 !模块5开发计划.md
