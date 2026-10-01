@@ -39,6 +39,7 @@
 !_patch_simplify_b3.py
 !_patch_d4.py
 !_study_gate_protection.py
+!_study_gate_failure.py
 
 # --- docs ---
 !模块5开发计划.md
