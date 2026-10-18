@@ -12,7 +12,9 @@ S1a超额43.27pp, S1e+10.41pp; 居首随端点在S1b/S2间翻转属已知模式)
 S2居首/S1e不变) → 09-18 门控批次重钉(12策略+S1aE/S2E/S1bV/S2V四门控变体: S1aM超额58.67pp微弱居首, S1a 43.23pp, S1e+5.99pp; 费率脆弱=S1aE/S1d/S2E) → 09-19 槽位批次重钉(13策略+S2K6; 09-18美股端点到达: S2M 50.49pp反超居首, S1a 30.90pp, S1e+3.48pp; 费率脆弱不变) → 09-20 看板简化批次日重钉
 (09-19/20行情端点到达B1上移挤压低频策略超额: S1a 28.06pp, S1e+0.64pp; S2M仍居首, 费率脆弱不变) → 10-19 扩池批次重钉
 (池5→7: 中移动00941/建行H00939入池引导9步全通, join_eff 2026-10-19; 新股历史replay触发稀释智谱/宁德集中度,
-B1 oos -6.51%: S1a超额 12.99pp/收益6.48%/费0.3%档1.60%, S1e -10.54pp, 样本外最强回到S2, 费率脆弱5席) —
+B1 oos -6.51%: S1a超额 12.99pp/收益6.48%/费0.3%档1.60%, S1e -10.54pp, 样本外最强回到S2, 费率脆弱5席) → 10-19 晚间回滚重钉
+(误扩池更正: 00941/00939当日join+leave双事件入台账, 池回5股; 5股10-16数据读数:
+S1a超额18.72pp/收益6.48%不变, S1e -5.53pp, 最强S2M(S2K6 47.55次之), 费率脆弱不变) —
 单点读数随端点漂移属已知模式, 唯一稳定裁决仍是前向测试
 注意: test_module5 每次运行会重生成当日批次(run_d2_backtests 同日覆盖), 行情刷新后
 B1(恒满仓)端点移动而空仓策略不动 → 超额期望值以"数据刷新后重生成"的批次为准"""
@@ -174,8 +176,8 @@ check("数值列 dtype 均为数值型 int64/float64 (无 object 混型, Arrow �
           for c in cmp_df.columns if c != '对象'))
 s1a = cmp_df[cmp_df['对象'].str.startswith('S1a ')].iloc[0]
 check(f"S1a OOS收益 6.48 (实际 {s1a['OOS收益%']})", abs(s1a['OOS收益%'] - 6.48) < 0.01)
-check(f"S1a OOS超额vsB1 12.99pp (实际 {s1a['OOS超额vsB1(pp)']})",
-      abs(s1a['OOS超额vsB1(pp)'] - 12.99) < 0.01)
+check(f"S1a OOS超额vsB1 18.72pp (实际 {s1a['OOS超额vsB1(pp)']})",
+      abs(s1a['OOS超额vsB1(pp)'] - 18.72) < 0.01)
 
 print("[6] 费率敏感性图构建")
 fig_fee = make_subplots(rows=1, cols=2, subplot_titles=("full 段", "oos 段"))
@@ -223,7 +225,7 @@ conclusions = []
 oos_strats = [(_bt_run(sid, 'oos'), sid) for sid in bt_strats]
 oos_valid = [(r, sid) for r, sid in oos_strats if r and r['excess_vs_bh'] is not None]
 best_r, best_sid = max(oos_valid, key=lambda x: x[0]['excess_vs_bh'])
-check(f"样本外最强 = S2 (10-19扩池批次13策略, 实际 {best_sid})", best_sid == 'S2')
+check(f"样本外最强 = S2M (10-19回滚批次13策略, 实际 {best_sid})", best_sid == 'S2M')
 oos_fee3 = [(_bt_run(sid, 'oos', 0.003), sid) for sid in bt_strats]
 fee_fragile = [sid for r, sid in oos_fee3
                if r and r['total_return'] is not None and r['total_return'] <= 0]
@@ -236,8 +238,8 @@ s2_oos = _bt_run('S2', 'oos')
 check(f"S2 oos 满仓拒率>30% 触发容量约束结论 (实际 {s2_oos['n_rejected']}/{s2_oos['n_triggers']})",
       s2_oos['n_rejected'] / s2_oos['n_triggers'] > 0.3)
 s1e_oos = _bt_run('S1e', 'oos')
-check(f"S1e oos 超额 -10.54pp (7股池批次; 冻结协议: 回测不改观察状态, 裁决=前向)",
-      abs(s1e_oos['excess_vs_bh'] - (-0.1054)) < 0.005
+check(f"S1e oos 超额 -5.53pp (5股池批次; 冻结协议: 回测不改观察状态, 裁决=前向)",
+      abs(s1e_oos['excess_vs_bh'] - (-0.0553)) < 0.005
       and quant_data.BT_STRATEGIES['S1e'].get('observation') is True)
 check("协议字段齐备", all(k in proto for k in
       ['knowledge_cutoff', 'freeze_date', 'honesty_note', 'freeze_rule']))
