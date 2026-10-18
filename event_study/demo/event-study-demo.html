@@ -1,0 +1,59 @@
+<!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8">
+<title>事件研究 Demo · 业绩预告</title>
+<script src="https://cdn.jsdelivr.net/npm/echarts@5/dist/echarts.min.js"></script>
+<style>
+body{font-family:"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;max-width:960px;margin:24px auto;padding:0 16px;color:#1F2328;background:#fff}
+h1{font-size:22px} h2{font-size:16px;margin-top:28px;border-left:3px solid #0969DA;padding-left:8px}
+.meta{background:#F6F8FA;border:1px solid #D8DEE4;border-radius:8px;padding:10px 14px;font-size:13px;color:#424A53}
+table{border-collapse:collapse;width:100%;font-size:13px;margin:10px 0}
+th,td{border:1px solid #D8DEE4;padding:5px 8px;text-align:center}
+th{background:#EAF1FB}
+.kpi{display:flex;gap:12px;margin:14px 0}
+.kpi div{flex:1;background:#F6F8FA;border-radius:8px;padding:10px 12px;font-size:13px}
+.kpi b{font-size:20px;display:block}
+.note{font-size:12px;color:#6E7781;background:#FFF7E8;border-left:3px solid #D48806;padding:8px 12px;margin-top:20px;line-height:1.7;break-inside:avoid;page-break-inside:avoid}
+#chart{width:100%;height:380px}
+.pos{color:#C0392B} .neg{color:#27AE60}
+</style></head><body>
+<h1>事件研究 Demo · A股业绩预告</h1>
+<div class="meta">研究宇宙A股10只 + 300750 · 事件源 demo_forecast_events(staging) · 市场模型 估计窗[-120,-10] OLS, MIN_OBS=60 · 生成 2026-10-18</div>
+<div class="kpi">
+  <div><b>53</b>有效事件(去重后)</div>
+  <div><b class="pos">46</b>利好组(预增/略增/扭亏/续盈)</div>
+  <div><b class="neg">7</b>利空组(预减/略减/首亏/续亏)</div>
+  <div><b>{'无次日行情': 0, '估计窗不足': 0, '窗口行情缺': 0}</b>跳过明细</div>
+</div>
+<h2>CAAR 曲线（事件窗 [-5,+10]，Day 0 = 公告日后首个交易日）</h2>
+<div id="chart"></div>
+<h2>窗口统计（CAR %，普通 t 检验）</h2>
+<h3 style="font-size:13px">利好组</h3><table><tr><th>窗口</th><th>n</th><th>CAR%</th><th>t</th><th>p</th><th>显著</th></tr><tr><td>[0,+0]</td><td>46</td><td>-0.68</td><td>-1.719</td><td>0.0926</td><td>*</td></tr><tr><td>[0,+1]</td><td>46</td><td>-0.81</td><td>-1.33</td><td>0.1902</td><td></td></tr><tr><td>[0,+3]</td><td>46</td><td>-1.62</td><td>-1.798</td><td>0.0789</td><td>*</td></tr><tr><td>[0,+5]</td><td>46</td><td>-1.31</td><td>-1.323</td><td>0.1926</td><td></td></tr><tr><td>[0,+10]</td><td>46</td><td>-2.79</td><td>-1.971</td><td>0.0549</td><td>*</td></tr><tr><td>[-5,+10]</td><td>46</td><td>-2.78</td><td>-1.484</td><td>0.1447</td><td></td></tr></table>
+<h3 style="font-size:13px">利空组</h3><table><tr><th>窗口</th><th>n</th><th>CAR%</th><th>t</th><th>p</th><th>显著</th></tr><tr><td>[0,+0]</td><td>7</td><td>+0.46</td><td>1.196</td><td>0.2768</td><td></td></tr><tr><td>[0,+1]</td><td>7</td><td>+0.23</td><td>0.515</td><td>0.6251</td><td></td></tr><tr><td>[0,+3]</td><td>7</td><td>+1.06</td><td>0.931</td><td>0.388</td><td></td></tr><tr><td>[0,+5]</td><td>7</td><td>+0.02</td><td>0.018</td><td>0.9865</td><td></td></tr><tr><td>[0,+10]</td><td>7</td><td>+0.48</td><td>0.179</td><td>0.8639</td><td></td></tr><tr><td>[-5,+10]</td><td>7</td><td>+1.10</td><td>0.353</td><td>0.7365</td><td></td></tr></table>
+<h2>事件清单（最近 60 条）</h2>
+<table><tr><th>公告日</th><th>代码</th><th>预告类型</th><th>组</th></tr><tr><td>2021-03-25</td><td>601899</td><td>预增</td><td>利好</td></tr><tr><td>2021-04-13</td><td>000725</td><td>预增</td><td>利好</td></tr><tr><td>2021-07-01</td><td>600030</td><td>略增</td><td>利好</td></tr><tr><td>2021-07-02</td><td>601899</td><td>预增</td><td>利好</td></tr><tr><td>2021-07-14</td><td>000725</td><td>预增</td><td>利好</td></tr><tr><td>2021-10-08</td><td>000725</td><td>预增</td><td>利好</td></tr><tr><td>2022-01-01</td><td>600519</td><td>略增</td><td>利好</td></tr><tr><td>2022-01-05</td><td>600030</td><td>略增</td><td>利好</td></tr><tr><td>2022-01-17</td><td>601899</td><td>预增</td><td>利好</td></tr><tr><td>2022-01-21</td><td>000725</td><td>预增</td><td>利好</td></tr><tr><td>2022-01-28</td><td>300750</td><td>预增</td><td>利好</td></tr><tr><td>2022-03-29</td><td>600519</td><td>略增</td><td>利好</td></tr><tr><td>2022-07-09</td><td>601899</td><td>预增</td><td>利好</td></tr><tr><td>2022-07-22</td><td>600519</td><td>略增</td><td>利好</td></tr><tr><td>2022-10-10</td><td>300750</td><td>预增</td><td>利好</td></tr><tr><td>2022-10-13</td><td>600519</td><td>略增</td><td>利好</td></tr><tr><td>2022-11-11</td><td>688981</td><td>略增</td><td>利好</td></tr><tr><td>2022-12-30</td><td>600519</td><td>略增</td><td>利好</td></tr><tr><td>2023-01-12</td><td>300750</td><td>预增</td><td>利好</td></tr><tr><td>2023-01-30</td><td>601899</td><td>略增</td><td>利好</td></tr><tr><td>2023-01-31</td><td>000725</td><td>首亏</td><td>利空</td></tr><tr><td>2023-01-31</td><td>000725</td><td>预减</td><td>利空</td></tr><tr><td>2023-04-17</td><td>600519</td><td>略增</td><td>利好</td></tr><tr><td>2023-07-08</td><td>601899</td><td>略减</td><td>利空</td></tr><tr><td>2023-07-14</td><td>600519</td><td>略增</td><td>利好</td></tr><tr><td>2023-07-15</td><td>000725</td><td>预减</td><td>利空</td></tr><tr><td>2023-07-15</td><td>000725</td><td>首亏</td><td>利空</td></tr><tr><td>2023-12-30</td><td>600519</td><td>略增</td><td>利好</td></tr><tr><td>2024-01-30</td><td>601899</td><td>略增</td><td>利好</td></tr><tr><td>2024-01-31</td><td>300750</td><td>略增</td><td>利好</td></tr><tr><td>2024-01-31</td><td>000725</td><td>预减</td><td>利空</td></tr><tr><td>2024-04-12</td><td>000725</td><td>预增</td><td>利好</td></tr><tr><td>2024-04-12</td><td>000725</td><td>扭亏</td><td>利好</td></tr><tr><td>2024-07-09</td><td>601899</td><td>略增</td><td>利好</td></tr><tr><td>2024-07-09</td><td>601899</td><td>预增</td><td>利好</td></tr><tr><td>2024-07-13</td><td>000725</td><td>预增</td><td>利好</td></tr><tr><td>2024-07-13</td><td>000725</td><td>扭亏</td><td>利好</td></tr><tr><td>2025-01-03</td><td>600519</td><td>略增</td><td>利好</td></tr><tr><td>2025-01-21</td><td>300750</td><td>略减</td><td>利空</td></tr><tr><td>2025-01-21</td><td>300750</td><td>略增</td><td>利好</td></tr><tr><td>2025-01-21</td><td>000725</td><td>扭亏</td><td>利好</td></tr><tr><td>2025-01-21</td><td>000725</td><td>预增</td><td>利好</td></tr><tr><td>2025-01-22</td><td>601899</td><td>略增</td><td>利好</td></tr><tr><td>2025-01-22</td><td>601899</td><td>预增</td><td>利好</td></tr><tr><td>2025-04-09</td><td>600030</td><td>略增</td><td>利好</td></tr><tr><td>2025-04-16</td><td>000725</td><td>预增</td><td>利好</td></tr><tr><td>2025-07-14</td><td>601899</td><td>略增</td><td>利好</td></tr><tr><td>2025-07-14</td><td>601899</td><td>预增</td><td>利好</td></tr><tr><td>2025-12-31</td><td>601899</td><td>预增</td><td>利好</td></tr><tr><td>2026-07-09</td><td>000725</td><td>预增</td><td>利好</td></tr><tr><td>2026-07-09</td><td>000725</td><td>略增</td><td>利好</td></tr><tr><td>2026-07-10</td><td>601899</td><td>预增</td><td>利好</td></tr><tr><td>2026-07-11</td><td>600030</td><td>预增</td><td>利好</td></tr></table>
+<div class="note">
+<b>Demo 口径声明（必读）</b>：<br>
+① 本页为<b>管线演示</b>，不构成任何"发现"声明——事件因子结论须经 E1 检验工具箱（BMP/KP/GRANK 三重检验+功效预算）与 E2 复现验收；<br>
+② 现用普通 t 检验：<b>未做 Kolari-Pynnönen 聚类修正</b>（预告季事件日高度聚类，t 值大概率虚高）、未做 BMP 事件诱导方差修正；<br>
+③ A股业绩预告为<b>条件强制披露</b>（净利润为负/扭亏/±50% 变动等情形），大市值公司预告稀疏——样本是强选择偏差子集，不能外推到全市场；<br>
+④ Day 0 = 公告日后首个交易日（盘后公告→次日映射的保守口径）；估计窗 [-120,-10] 市场模型（沪深300），最少 60 观测；<br>
+⑤ 事件与行情均来自研究宇宙（research_universe，与交易池分离）；staging 表 demo_forecast_events，不影响任何生产表与策略面。
+</div>
+<script>
+var chart = echarts.init(document.getElementById('chart'));
+var good = [[-5,-0.003057443328917203],[-4,-0.010227934544595174],[-3,-0.008169528184151821],[-2,-0.0103689194976289],[-1,0.0001497479835967288],[0,-0.006695579694706632],[1,-0.00792821385829107],[2,-0.010490204989636277],[3,-0.016086878986228667],[4,-0.017148228724697973],[5,-0.012997183151587273],[6,-0.017411067063743433],[7,-0.016405832827723652],[8,-0.019959530170781208],[9,-0.023684210951282262],[10,-0.027761588115989895]];
+var bad = [[-5,-0.0035267870206467313],[-4,0.002075177790059834],[-3,0.0030890638344117085],[-2,0.0069316601601926205],[-1,0.006137996200217608],[0,0.010729208772912809],[1,0.008393498676038547],[2,0.01080672505663814],[3,0.016739693515080187],[4,0.013538365363994984],[5,0.006378644471327694],[6,0.008443354578506293],[7,0.005837683466888386],[8,-0.003924406957106381],[9,-0.007931830805884867],[10,0.010958494679471159]];
+var rel = good.length ? good.map(function(p){return p[0];}) : bad.map(function(p){return p[0];});
+chart.setOption({
+  animation:false,
+  grid:{left:50,right:20,top:40,bottom:36},
+  xAxis:{type:'category',data:rel,name:'相对交易日',nameLocation:'middle',nameGap:26},
+  yAxis:{type:'value',name:'CAAR %',axisLabel:{formatter:'{value}%'}},
+  series:[
+    {name:'利好(预增/略增/扭亏/续盈)',type:'line',data:good.map(function(p){return p[1];}),symbolSize:6,lineStyle:{width:2.5,color:'#C0392B'},itemStyle:{color:'#C0392B'},label:{show:false}},
+    {name:'利空(预减/略减/首亏/续亏)',type:'line',data:bad.map(function(p){return p[1];}),symbolSize:6,lineStyle:{width:2.5,color:'#27AE60'},itemStyle:{color:'#27AE60'}}
+  ],
+  legend:{top:6},
+  tooltip:{trigger:'axis',valueFormatter:function(v){return (v===null?'—':v.toFixed(2)+'%');}}
+});
+</script>
+</body></html>
