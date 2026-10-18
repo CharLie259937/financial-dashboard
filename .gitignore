@@ -64,6 +64,11 @@
 !_demo_report.py
 !event_study/demo/event-study-demo.html
 !event_study/demo/demo-result.json
+!_demo_hk_fetch.py
+!_demo_hk_study.py
+!_demo_hk_report.py
+!event_study/demo/event-study-demo-hk.html
+!event_study/demo/demo-hk-result.json
 !risk_control/
 !risk_control/**
 !event_study/

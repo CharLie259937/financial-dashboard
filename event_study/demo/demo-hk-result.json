@@ -1,0 +1,1195 @@
+{
+ "meta": {
+  "generated": "2026-10-19",
+  "market": "港股",
+  "source": "demo_hk_earnings(staging, 东财港股东悉E1同源) + daily_quotes + 恒生指数",
+  "universe": "研究宇宙港股10只 + 00700/02513 (汇丰00005/友邦01299东财无公告覆盖, 缺口已记)",
+  "engine": "市场模型 估计窗[-120,-10] OLS(恒指), MIN_OBS=60, Day0=公告日后首个交易日",
+  "n_events": 132,
+  "skipped": {
+   "早于行情(2020-06前)": 130,
+   "无次日行情": 0,
+   "估计窗不足": 4,
+   "窗口行情缺": 0
+  },
+  "groups": {
+   "annual": 38,
+   "interim": 35,
+   "quarterly": 59
+  }
+ },
+ "groups": {
+  "annual": {
+   "curve": {
+    "rel_days": [
+     -5,
+     -4,
+     -3,
+     -2,
+     -1,
+     0,
+     1,
+     2,
+     3,
+     4,
+     5,
+     6,
+     7,
+     8,
+     9,
+     10
+    ],
+    "aar": [
+     0.0010740263594901521,
+     -0.0017409810777239993,
+     -0.0012032745815180922,
+     0.003368037169351427,
+     0.0019386768505769432,
+     -0.012012651735330617,
+     0.003303364352897081,
+     -0.0008634857148185573,
+     0.009040802404948561,
+     0.0007379122859061587,
+     0.0009768239311975632,
+     -0.002942430137505163,
+     0.0013587005192453102,
+     -0.003272761800095829,
+     0.004655266342641397,
+     -0.0019431308543984998
+    ],
+    "caar": [
+     0.0010740263594901521,
+     -0.0006669547182338472,
+     -0.0018702292997519394,
+     0.0014978078695994876,
+     0.0034364847201764307,
+     -0.008576167015154186,
+     -0.005272802662257105,
+     -0.0061362883770756625,
+     0.002904514027872899,
+     0.0036424263137790577,
+     0.004619250244976621,
+     0.0016768201074714578,
+     0.0030355206267167678,
+     -0.00023724117337906112,
+     0.004418025169262336,
+     0.002474894314863836
+    ],
+    "n_by_day": [
+     38,
+     38,
+     38,
+     38,
+     38,
+     38,
+     38,
+     38,
+     38,
+     38,
+     38,
+     38,
+     38,
+     38,
+     38,
+     38
+    ]
+   },
+   "windows": [
+    {
+     "window": "[0,+0]",
+     "n": 38,
+     "car_mean": -1.2013,
+     "t_stat": -1.463,
+     "p_value": 0.1518,
+     "sig": ""
+    },
+    {
+     "window": "[0,+1]",
+     "n": 38,
+     "car_mean": -0.8709,
+     "t_stat": -0.974,
+     "p_value": 0.3366,
+     "sig": ""
+    },
+    {
+     "window": "[0,+3]",
+     "n": 38,
+     "car_mean": -0.0532,
+     "t_stat": -0.056,
+     "p_value": 0.9558,
+     "sig": ""
+    },
+    {
+     "window": "[0,+5]",
+     "n": 38,
+     "car_mean": 0.1183,
+     "t_stat": 0.106,
+     "p_value": 0.9162,
+     "sig": ""
+    },
+    {
+     "window": "[0,+10]",
+     "n": 38,
+     "car_mean": -0.0962,
+     "t_stat": -0.069,
+     "p_value": 0.945,
+     "sig": ""
+    },
+    {
+     "window": "[-5,+10]",
+     "n": 38,
+     "car_mean": 0.2475,
+     "t_stat": 0.173,
+     "p_value": 0.8632,
+     "sig": ""
+    }
+   ]
+  },
+  "interim": {
+   "curve": {
+    "rel_days": [
+     -5,
+     -4,
+     -3,
+     -2,
+     -1,
+     0,
+     1,
+     2,
+     3,
+     4,
+     5,
+     6,
+     7,
+     8,
+     9,
+     10
+    ],
+    "aar": [
+     0.0003442363198704783,
+     -0.0012544058594261946,
+     0.0034633673765170135,
+     -0.00024081731393791567,
+     0.0023015161228036574,
+     -0.0027307271555764875,
+     5.3182904136089836e-05,
+     -0.0038618719710412394,
+     0.0031160913441918093,
+     -0.0034889063886301384,
+     -0.0008284935690295223,
+     -0.0011361744371892457,
+     -0.004844879531404801,
+     0.005581242386093805,
+     -0.0037178782199286213,
+     -0.0045801912765763494
+    ],
+    "caar": [
+     0.0003442363198704783,
+     -0.0009101695395557162,
+     0.0025531978369612972,
+     0.0023123805230233817,
+     0.004613896645827039,
+     0.0018831694902505512,
+     0.001936352394386641,
+     -0.0019255195766545983,
+     0.001190571767537211,
+     -0.0022983346210929275,
+     -0.00312682819012245,
+     -0.004263002627311696,
+     -0.009107882158716496,
+     -0.0035266397726226913,
+     -0.007244517992551313,
+     -0.011824709269127662
+    ],
+    "n_by_day": [
+     35,
+     35,
+     35,
+     35,
+     35,
+     35,
+     35,
+     35,
+     35,
+     35,
+     35,
+     35,
+     35,
+     35,
+     35,
+     35
+    ]
+   },
+   "windows": [
+    {
+     "window": "[0,+0]",
+     "n": 35,
+     "car_mean": -0.2731,
+     "t_stat": -0.32,
+     "p_value": 0.7506,
+     "sig": ""
+    },
+    {
+     "window": "[0,+1]",
+     "n": 35,
+     "car_mean": -0.2678,
+     "t_stat": -0.283,
+     "p_value": 0.7792,
+     "sig": ""
+    },
+    {
+     "window": "[0,+3]",
+     "n": 35,
+     "car_mean": -0.3423,
+     "t_stat": -0.265,
+     "p_value": 0.7928,
+     "sig": ""
+    },
+    {
+     "window": "[0,+5]",
+     "n": 35,
+     "car_mean": -0.7741,
+     "t_stat": -0.491,
+     "p_value": 0.6263,
+     "sig": ""
+    },
+    {
+     "window": "[0,+10]",
+     "n": 35,
+     "car_mean": -1.6439,
+     "t_stat": -0.681,
+     "p_value": 0.5007,
+     "sig": ""
+    },
+    {
+     "window": "[-5,+10]",
+     "n": 35,
+     "car_mean": -1.1825,
+     "t_stat": -0.479,
+     "p_value": 0.635,
+     "sig": ""
+    }
+   ]
+  },
+  "quarterly": {
+   "curve": {
+    "rel_days": [
+     -5,
+     -4,
+     -3,
+     -2,
+     -1,
+     0,
+     1,
+     2,
+     3,
+     4,
+     5,
+     6,
+     7,
+     8,
+     9,
+     10
+    ],
+    "aar": [
+     -0.0008354490069895943,
+     -0.001980748002769631,
+     0.0027545487250481442,
+     0.00034565110517279434,
+     0.00038631252928562746,
+     0.003396390392636566,
+     -0.003147922817606957,
+     -0.0013289842941329602,
+     0.005277553298331515,
+     -0.00213864156416287,
+     0.0027241648159941345,
+     0.005118314144129703,
+     -0.0007774101574945918,
+     -0.0023126418123679843,
+     -0.0013314143755914598,
+     -8.223244742021897e-05
+    ],
+    "caar": [
+     -0.0008354490069895943,
+     -0.002816197009759225,
+     -6.164828471108075e-05,
+     0.0002840028204617136,
+     0.000670315349747341,
+     0.004066705742383907,
+     0.0009187829247769503,
+     -0.00041020136935601,
+     0.004867351928975505,
+     0.002728710364812635,
+     0.00545287518080677,
+     0.010571189324936472,
+     0.00979377916744188,
+     0.007481137355073896,
+     0.006149722979482436,
+     0.006067490532062217
+    ],
+    "n_by_day": [
+     59,
+     59,
+     59,
+     59,
+     59,
+     59,
+     59,
+     59,
+     59,
+     59,
+     59,
+     59,
+     59,
+     59,
+     59,
+     59
+    ]
+   },
+   "windows": [
+    {
+     "window": "[0,+0]",
+     "n": 59,
+     "car_mean": 0.3396,
+     "t_stat": 0.49,
+     "p_value": 0.626,
+     "sig": ""
+    },
+    {
+     "window": "[0,+1]",
+     "n": 59,
+     "car_mean": 0.0248,
+     "t_stat": 0.031,
+     "p_value": 0.975,
+     "sig": ""
+    },
+    {
+     "window": "[0,+3]",
+     "n": 59,
+     "car_mean": 0.4197,
+     "t_stat": 0.477,
+     "p_value": 0.6353,
+     "sig": ""
+    },
+    {
+     "window": "[0,+5]",
+     "n": 59,
+     "car_mean": 0.4783,
+     "t_stat": 0.547,
+     "p_value": 0.5868,
+     "sig": ""
+    },
+    {
+     "window": "[0,+10]",
+     "n": 59,
+     "car_mean": 0.5397,
+     "t_stat": 0.476,
+     "p_value": 0.6358,
+     "sig": ""
+    },
+    {
+     "window": "[-5,+10]",
+     "n": 59,
+     "car_mean": 0.6067,
+     "t_stat": 0.467,
+     "p_value": 0.6425,
+     "sig": ""
+    }
+   ]
+  }
+ },
+ "events": [
+  {
+   "code": "00688",
+   "date": "2017-03-22",
+   "type": "annual",
+   "group": "annual"
+  },
+  {
+   "code": "00688",
+   "date": "2017-08-21",
+   "type": "interim",
+   "group": "interim"
+  },
+  {
+   "code": "00688",
+   "date": "2018-03-26",
+   "type": "annual",
+   "group": "annual"
+  },
+  {
+   "code": "00688",
+   "date": "2018-08-23",
+   "type": "interim",
+   "group": "interim"
+  },
+  {
+   "code": "03690",
+   "date": "2019-03-11",
+   "type": "annual",
+   "group": "annual"
+  },
+  {
+   "code": "00688",
+   "date": "2019-03-20",
+   "type": "annual",
+   "group": "annual"
+  },
+  {
+   "code": "00700",
+   "date": "2019-03-21",
+   "type": "annual",
+   "group": "annual"
+  },
+  {
+   "code": "00700",
+   "date": "2019-05-15",
+   "type": "q1",
+   "group": "quarterly"
+  },
+  {
+   "code": "03690",
+   "date": "2019-05-23",
+   "type": "q1",
+   "group": "quarterly"
+  },
+  {
+   "code": "00700",
+   "date": "2019-08-14",
+   "type": "interim",
+   "group": "interim"
+  },
+  {
+   "code": "00688",
+   "date": "2019-08-22",
+   "type": "interim",
+   "group": "interim"
+  },
+  {
+   "code": "03690",
+   "date": "2019-08-23",
+   "type": "interim",
+   "group": "interim"
+  },
+  {
+   "code": "00700",
+   "date": "2019-11-13",
+   "type": "q3",
+   "group": "quarterly"
+  },
+  {
+   "code": "03690",
+   "date": "2019-11-21",
+   "type": "q1",
+   "group": "quarterly"
+  },
+  {
+   "code": "00700",
+   "date": "2020-03-18",
+   "type": "annual",
+   "group": "annual"
+  },
+  {
+   "code": "00688",
+   "date": "2020-03-26",
+   "type": "annual",
+   "group": "annual"
+  },
+  {
+   "code": "03690",
+   "date": "2020-03-30",
+   "type": "annual",
+   "group": "annual"
+  },
+  {
+   "code": "00700",
+   "date": "2020-05-13",
+   "type": "q1",
+   "group": "quarterly"
+  },
+  {
+   "code": "09988",
+   "date": "2020-05-22",
+   "type": "annual",
+   "group": "annual"
+  },
+  {
+   "code": "03690",
+   "date": "2020-05-25",
+   "type": "q1",
+   "group": "quarterly"
+  },
+  {
+   "code": "00700",
+   "date": "2020-08-12",
+   "type": "interim",
+   "group": "interim"
+  },
+  {
+   "code": "09988",
+   "date": "2020-08-20",
+   "type": "earnings",
+   "group": "quarterly"
+  },
+  {
+   "code": "03690",
+   "date": "2020-08-21",
+   "type": "interim",
+   "group": "interim"
+  },
+  {
+   "code": "00688",
+   "date": "2020-08-24",
+   "type": "interim",
+   "group": "interim"
+  },
+  {
+   "code": "09988",
+   "date": "2020-11-06",
+   "type": "earnings",
+   "group": "quarterly"
+  },
+  {
+   "code": "00700",
+   "date": "2020-11-12",
+   "type": "q3",
+   "group": "quarterly"
+  },
+  {
+   "code": "03690",
+   "date": "2020-11-30",
+   "type": "q1",
+   "group": "quarterly"
+  },
+  {
+   "code": "09988",
+   "date": "2021-02-02",
+   "type": "earnings",
+   "group": "quarterly"
+  },
+  {
+   "code": "00700",
+   "date": "2021-03-24",
+   "type": "annual",
+   "group": "annual"
+  },
+  {
+   "code": "03690",
+   "date": "2021-03-26",
+   "type": "annual",
+   "group": "annual"
+  },
+  {
+   "code": "00688",
+   "date": "2021-03-29",
+   "type": "annual",
+   "group": "annual"
+  },
+  {
+   "code": "09988",
+   "date": "2021-05-13",
+   "type": "annual",
+   "group": "annual"
+  },
+  {
+   "code": "00700",
+   "date": "2021-05-20",
+   "type": "q1",
+   "group": "quarterly"
+  },
+  {
+   "code": "01024",
+   "date": "2021-05-24",
+   "type": "q1",
+   "group": "quarterly"
+  },
+  {
+   "code": "03690",
+   "date": "2021-05-28",
+   "type": "q1",
+   "group": "quarterly"
+  },
+  {
+   "code": "09988",
+   "date": "2021-08-03",
+   "type": "earnings",
+   "group": "quarterly"
+  },
+  {
+   "code": "00700",
+   "date": "2021-08-18",
+   "type": "interim",
+   "group": "interim"
+  },
+  {
+   "code": "00688",
+   "date": "2021-08-23",
+   "type": "interim",
+   "group": "interim"
+  },
+  {
+   "code": "01024",
+   "date": "2021-08-25",
+   "type": "interim",
+   "group": "interim"
+  },
+  {
+   "code": "03690",
+   "date": "2021-08-30",
+   "type": "interim",
+   "group": "interim"
+  },
+  {
+   "code": "00700",
+   "date": "2021-11-10",
+   "type": "q3",
+   "group": "quarterly"
+  },
+  {
+   "code": "09988",
+   "date": "2021-11-18",
+   "type": "earnings",
+   "group": "quarterly"
+  },
+  {
+   "code": "01024",
+   "date": "2021-11-23",
+   "type": "q3",
+   "group": "quarterly"
+  },
+  {
+   "code": "03690",
+   "date": "2021-11-26",
+   "type": "q1",
+   "group": "quarterly"
+  },
+  {
+   "code": "09988",
+   "date": "2022-02-24",
+   "type": "earnings",
+   "group": "quarterly"
+  },
+  {
+   "code": "00700",
+   "date": "2022-03-23",
+   "type": "annual",
+   "group": "annual"
+  },
+  {
+   "code": "03690",
+   "date": "2022-03-25",
+   "type": "annual",
+   "group": "annual"
+  },
+  {
+   "code": "01024",
+   "date": "2022-03-29",
+   "type": "annual",
+   "group": "annual"
+  },
+  {
+   "code": "00688",
+   "date": "2022-03-31",
+   "type": "annual",
+   "group": "annual"
+  },
+  {
+   "code": "00700",
+   "date": "2022-05-18",
+   "type": "q1",
+   "group": "quarterly"
+  },
+  {
+   "code": "01024",
+   "date": "2022-05-24",
+   "type": "q1",
+   "group": "quarterly"
+  },
+  {
+   "code": "09988",
+   "date": "2022-05-26",
+   "type": "annual",
+   "group": "annual"
+  },
+  {
+   "code": "03690",
+   "date": "2022-06-02",
+   "type": "q1",
+   "group": "quarterly"
+  },
+  {
+   "code": "09988",
+   "date": "2022-08-04",
+   "type": "earnings",
+   "group": "quarterly"
+  },
+  {
+   "code": "00700",
+   "date": "2022-08-17",
+   "type": "interim",
+   "group": "interim"
+  },
+  {
+   "code": "01024",
+   "date": "2022-08-23",
+   "type": "interim",
+   "group": "interim"
+  },
+  {
+   "code": "00688",
+   "date": "2022-08-24",
+   "type": "interim",
+   "group": "interim"
+  },
+  {
+   "code": "03690",
+   "date": "2022-08-26",
+   "type": "interim",
+   "group": "interim"
+  },
+  {
+   "code": "00700",
+   "date": "2022-11-16",
+   "type": "q3",
+   "group": "quarterly"
+  },
+  {
+   "code": "09988",
+   "date": "2022-11-17",
+   "type": "earnings",
+   "group": "quarterly"
+  },
+  {
+   "code": "01024",
+   "date": "2022-11-22",
+   "type": "q3",
+   "group": "quarterly"
+  },
+  {
+   "code": "03690",
+   "date": "2022-11-25",
+   "type": "q1",
+   "group": "quarterly"
+  },
+  {
+   "code": "09988",
+   "date": "2023-02-23",
+   "type": "earnings",
+   "group": "quarterly"
+  },
+  {
+   "code": "00700",
+   "date": "2023-03-22",
+   "type": "annual",
+   "group": "annual"
+  },
+  {
+   "code": "03690",
+   "date": "2023-03-24",
+   "type": "annual",
+   "group": "annual"
+  },
+  {
+   "code": "01024",
+   "date": "2023-03-29",
+   "type": "annual",
+   "group": "annual"
+  },
+  {
+   "code": "00688",
+   "date": "2023-03-31",
+   "type": "annual",
+   "group": "annual"
+  },
+  {
+   "code": "00700",
+   "date": "2023-05-17",
+   "type": "q1",
+   "group": "quarterly"
+  },
+  {
+   "code": "09988",
+   "date": "2023-05-18",
+   "type": "annual",
+   "group": "annual"
+  },
+  {
+   "code": "01024",
+   "date": "2023-05-22",
+   "type": "q1",
+   "group": "quarterly"
+  },
+  {
+   "code": "03690",
+   "date": "2023-05-25",
+   "type": "q1",
+   "group": "quarterly"
+  },
+  {
+   "code": "09988",
+   "date": "2023-08-10",
+   "type": "earnings",
+   "group": "quarterly"
+  },
+  {
+   "code": "00700",
+   "date": "2023-08-16",
+   "type": "interim",
+   "group": "interim"
+  },
+  {
+   "code": "01024",
+   "date": "2023-08-22",
+   "type": "interim",
+   "group": "interim"
+  },
+  {
+   "code": "03690",
+   "date": "2023-08-24",
+   "type": "interim",
+   "group": "interim"
+  },
+  {
+   "code": "00688",
+   "date": "2023-08-28",
+   "type": "interim",
+   "group": "interim"
+  },
+  {
+   "code": "00700",
+   "date": "2023-11-15",
+   "type": "q3",
+   "group": "quarterly"
+  },
+  {
+   "code": "09988",
+   "date": "2023-11-16",
+   "type": "earnings",
+   "group": "quarterly"
+  },
+  {
+   "code": "01024",
+   "date": "2023-11-21",
+   "type": "q3",
+   "group": "quarterly"
+  },
+  {
+   "code": "03690",
+   "date": "2023-11-28",
+   "type": "q1",
+   "group": "quarterly"
+  },
+  {
+   "code": "09988",
+   "date": "2024-02-07",
+   "type": "earnings",
+   "group": "quarterly"
+  },
+  {
+   "code": "01024",
+   "date": "2024-03-20",
+   "type": "annual",
+   "group": "annual"
+  },
+  {
+   "code": "00700",
+   "date": "2024-03-20",
+   "type": "annual",
+   "group": "annual"
+  },
+  {
+   "code": "03690",
+   "date": "2024-03-22",
+   "type": "annual",
+   "group": "annual"
+  },
+  {
+   "code": "00688",
+   "date": "2024-03-28",
+   "type": "annual",
+   "group": "annual"
+  },
+  {
+   "code": "09988",
+   "date": "2024-05-14",
+   "type": "annual",
+   "group": "annual"
+  },
+  {
+   "code": "00700",
+   "date": "2024-05-14",
+   "type": "q1",
+   "group": "quarterly"
+  },
+  {
+   "code": "01024",
+   "date": "2024-05-22",
+   "type": "q1",
+   "group": "quarterly"
+  },
+  {
+   "code": "03690",
+   "date": "2024-06-06",
+   "type": "q1",
+   "group": "quarterly"
+  },
+  {
+   "code": "00700",
+   "date": "2024-08-14",
+   "type": "interim",
+   "group": "interim"
+  },
+  {
+   "code": "09988",
+   "date": "2024-08-15",
+   "type": "earnings",
+   "group": "quarterly"
+  },
+  {
+   "code": "01024",
+   "date": "2024-08-20",
+   "type": "interim",
+   "group": "interim"
+  },
+  {
+   "code": "03690",
+   "date": "2024-08-28",
+   "type": "interim",
+   "group": "interim"
+  },
+  {
+   "code": "00688",
+   "date": "2024-08-28",
+   "type": "interim",
+   "group": "interim"
+  },
+  {
+   "code": "00700",
+   "date": "2024-11-13",
+   "type": "q3",
+   "group": "quarterly"
+  },
+  {
+   "code": "09988",
+   "date": "2024-11-15",
+   "type": "earnings",
+   "group": "quarterly"
+  },
+  {
+   "code": "09988",
+   "date": "2024-11-15",
+   "type": "interim",
+   "group": "interim"
+  },
+  {
+   "code": "01024",
+   "date": "2024-11-20",
+   "type": "q3",
+   "group": "quarterly"
+  },
+  {
+   "code": "03690",
+   "date": "2024-11-29",
+   "type": "q1",
+   "group": "quarterly"
+  },
+  {
+   "code": "09988",
+   "date": "2025-02-20",
+   "type": "earnings",
+   "group": "quarterly"
+  },
+  {
+   "code": "00700",
+   "date": "2025-03-19",
+   "type": "annual",
+   "group": "annual"
+  },
+  {
+   "code": "03690",
+   "date": "2025-03-21",
+   "type": "annual",
+   "group": "annual"
+  },
+  {
+   "code": "01024",
+   "date": "2025-03-25",
+   "type": "annual",
+   "group": "annual"
+  },
+  {
+   "code": "00688",
+   "date": "2025-03-31",
+   "type": "annual",
+   "group": "annual"
+  },
+  {
+   "code": "00700",
+   "date": "2025-05-14",
+   "type": "q1",
+   "group": "quarterly"
+  },
+  {
+   "code": "09988",
+   "date": "2025-05-15",
+   "type": "annual",
+   "group": "annual"
+  },
+  {
+   "code": "03690",
+   "date": "2025-05-26",
+   "type": "q1",
+   "group": "quarterly"
+  },
+  {
+   "code": "01024",
+   "date": "2025-05-27",
+   "type": "q1",
+   "group": "quarterly"
+  },
+  {
+   "code": "00700",
+   "date": "2025-08-13",
+   "type": "interim",
+   "group": "interim"
+  },
+  {
+   "code": "01024",
+   "date": "2025-08-21",
+   "type": "interim",
+   "group": "interim"
+  },
+  {
+   "code": "03690",
+   "date": "2025-08-27",
+   "type": "interim",
+   "group": "interim"
+  },
+  {
+   "code": "00688",
+   "date": "2025-08-27",
+   "type": "interim",
+   "group": "interim"
+  },
+  {
+   "code": "09988",
+   "date": "2025-08-29",
+   "type": "earnings",
+   "group": "quarterly"
+  },
+  {
+   "code": "00700",
+   "date": "2025-11-13",
+   "type": "q3",
+   "group": "quarterly"
+  },
+  {
+   "code": "01024",
+   "date": "2025-11-19",
+   "type": "q3",
+   "group": "quarterly"
+  },
+  {
+   "code": "09988",
+   "date": "2025-11-25",
+   "type": "interim",
+   "group": "interim"
+  },
+  {
+   "code": "03690",
+   "date": "2025-11-28",
+   "type": "q1",
+   "group": "quarterly"
+  },
+  {
+   "code": "00700",
+   "date": "2026-03-18",
+   "type": "annual",
+   "group": "annual"
+  },
+  {
+   "code": "09988",
+   "date": "2026-03-19",
+   "type": "earnings",
+   "group": "quarterly"
+  },
+  {
+   "code": "01024",
+   "date": "2026-03-25",
+   "type": "annual",
+   "group": "annual"
+  },
+  {
+   "code": "03690",
+   "date": "2026-03-26",
+   "type": "annual",
+   "group": "annual"
+  },
+  {
+   "code": "00688",
+   "date": "2026-03-31",
+   "type": "annual",
+   "group": "annual"
+  },
+  {
+   "code": "09988",
+   "date": "2026-05-13",
+   "type": "annual",
+   "group": "annual"
+  },
+  {
+   "code": "00700",
+   "date": "2026-05-13",
+   "type": "q1",
+   "group": "quarterly"
+  },
+  {
+   "code": "01024",
+   "date": "2026-05-27",
+   "type": "q1",
+   "group": "quarterly"
+  },
+  {
+   "code": "03690",
+   "date": "2026-06-01",
+   "type": "q1",
+   "group": "quarterly"
+  },
+  {
+   "code": "00700",
+   "date": "2026-08-12",
+   "type": "interim",
+   "group": "interim"
+  },
+  {
+   "code": "01024",
+   "date": "2026-08-19",
+   "type": "interim",
+   "group": "interim"
+  },
+  {
+   "code": "09988",
+   "date": "2026-08-20",
+   "type": "earnings",
+   "group": "quarterly"
+  },
+  {
+   "code": "00688",
+   "date": "2026-08-26",
+   "type": "interim",
+   "group": "interim"
+  },
+  {
+   "code": "03690",
+   "date": "2026-08-28",
+   "type": "interim",
+   "group": "interim"
+  },
+  {
+   "code": "02513",
+   "date": "2026-08-31",
+   "type": "interim",
+   "group": "interim"
+  }
+ ]
+}
